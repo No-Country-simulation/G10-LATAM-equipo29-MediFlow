@@ -6,10 +6,14 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit --incremental false"
   },
   "dependencies": {
-    "next": "14.2.35",
+    "next": "^16.3.7",
+    "oci-common": "^2.142.1",
+    "oci-objectstorage": "^2.142.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "zod": "3.23.8"
@@ -18,6 +22,7 @@
     "@types/node": "20.14.10",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
+    "tsx": "^4.23.15",
     "typescript": "5.5.3"
   }
 }

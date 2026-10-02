@@ -1,14 +1,14 @@
 /**
- * POST /api/ingest/file — Ingiere un documento clínico en PDF o IMAGEN.
+ * POST /api/ingest/file — Ingiere un documento clínico en PDF, IMAGEN o JSON.
  * multipart/form-data con campos: archivo (File), canal_origen (opcional).
  *
  * Usa el runtime Node.js de Vercel (no Edge) porque necesitamos Buffer y
- * escritura a /tmp para el stub de persistencia.
+ * el SDK de OCI Object Storage.
  */
 import { NextResponse } from "next/server";
 
 import { generarDocumentoId, MetadatoDocumento, ResultadoIngesta, validarCanalOrigen } from "@/lib/types";
-import { persistirEnOciStub, persistirMetadatoStub } from "@/lib/storage";
+import { ErrorAlmacenamiento, formatoOriginal, persistirDocumentoRecibido } from "@/lib/storage";
 import {
   ArchivoDemasiadoGrandeError,
   ArchivoInconsistenteError,
@@ -38,8 +38,8 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         status: "rechazado",
-        detalle: "Falta el campo 'archivo' (PDF o IMAGEN) en el form-data.",
-        formatos_soportados: ["PDF", "IMAGEN", "JSON", "TEXTO"],
+        detalle: "Falta el campo 'archivo' (PDF, IMAGEN o JSON) en el form-data.",
+        formatos_soportados: ["PDF", "IMAGEN", "JSON"],
       },
       { status: 422 },
     );
@@ -65,9 +65,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const contenido = new Uint8Array(await archivo.arrayBuffer());
-
   try {
+    const contenido = new Uint8Array(await archivo.arrayBuffer());
     const { tipoDetectado, tamanoBytes } = validarArchivo(
       archivo.name,
       archivo.type,
@@ -75,8 +74,6 @@ export async function POST(request: Request) {
     );
 
     const documentoId = generarDocumentoId();
-    const nombreGuardado = `${documentoId}_${archivo.name}`;
-    const rutaObjeto = await persistirEnOciStub(nombreGuardado, contenido);
     const recibidoEn = new Date().toISOString();
 
     const metadato: MetadatoDocumento = {
@@ -87,7 +84,12 @@ export async function POST(request: Request) {
       recibido_en: recibidoEn,
       nombre_original: archivo.name,
     };
-    await persistirMetadatoStub(nombreGuardado, metadato);
+    const formato = tipoDetectado === "JSON"
+      ? { extension: "json", contentType: "application/json" }
+      : formatoOriginal(contenido);
+    const almacenamiento = await persistirDocumentoRecibido({
+      contenido, ...formato, metadato,
+    });
 
     const resultado: ResultadoIngesta = {
       status: "recibido",
@@ -96,17 +98,20 @@ export async function POST(request: Request) {
       tamano_bytes: tamanoBytes,
       canal_origen: canalOrigen,
       recibido_en: recibidoEn,
-      ruta_objeto_temporal: rutaObjeto,
+      almacenamiento_oci: almacenamiento,
     };
 
     return NextResponse.json(resultado, { status: 201 });
   } catch (error) {
+    if (error instanceof ErrorAlmacenamiento) {
+      return NextResponse.json({ status: "rechazado", detalle: error.message }, { status: error.status });
+    }
     if (error instanceof FormatoNoSoportadoError) {
       return NextResponse.json(
         {
           status: "rechazado",
           detalle: error.message,
-          formatos_soportados: ["PDF", "IMAGEN", "JSON", "TEXTO"],
+          formatos_soportados: ["PDF", "IMAGEN", "JSON"],
         },
         { status: 415 },
       );

@@ -26,19 +26,20 @@ etc.).
 ```
 app/
   page.tsx                    → pantalla de envío (React)
-  api/ingest/file/route.ts    → POST — sube PDF o IMAGEN (multipart/form-data)
+  api/ingest/file/route.ts    → POST — sube PDF, IMAGEN o JSON (multipart/form-data)
   api/ingest/json/route.ts    → POST — envía JSON/texto (application/json)
   api/ingest/salud/route.ts   → GET  — healthcheck
 lib/
   types.ts                    → enums, esquema Zod, contrato ResultadoIngesta
   validators.ts                → validación en 3 capas (extensión + MIME + firma binaria)
-  storage.ts                    → stub de persistencia (TODO: reemplazar por OCI SDK)
+  storage.ts                    → persistencia real con el SDK de OCI Object Storage
 ```
 
 ## Ejecutar localmente
 
 ```bash
 npm install
+# Copiar .env.example a .env.local y completar configuración OCI (ver abajo).
 npm run dev
 # abre http://localhost:3000
 ```
@@ -50,11 +51,115 @@ npm i -g vercel   # si no lo tenés
 vercel             # sigue el flujo interactivo (o conecta el repo desde vercel.com)
 ```
 
-No requiere variables de entorno para funcionar en modo demo (usa `/tmp`
-como almacenamiento temporal). Cuando conectes OCI Object Storage, agregá
-las credenciales como Environment Variables del proyecto en Vercel y
-reemplazá `lib/storage.ts` por el SDK real (ver el comentario `TODO(OCI)`
-dentro del archivo).
+Configurar las variables de `.env.example` como variables del servidor en
+Vercel. No usar el prefijo `NEXT_PUBLIC_`. No hay almacenamiento temporal ni
+modo demo: sin configuración OCI, las cargas devuelven `503`.
+
+## Configurar OCI Object Storage
+
+Requiere Node.js >=20.9.0 y un bucket privado existente llamado
+`mediflow-documentos-clinicos`. Esta integración no crea buckets ni políticas IAM.
+
+1. Copiar `.env.example` a `.env.local`, si todavía no existe.
+2. Completar `OCI_REGION` y `OCI_NAMESPACE`.
+3. Elegir autenticación:
+   - `OCI_AUTH_MODE=api_key`: completar `OCI_TENANCY_OCID`, `OCI_USER_OCID`,
+     `OCI_FINGERPRINT` y `OCI_PRIVATE_KEY` (PEM completo). La clave pública
+     correspondiente debe estar registrada como API Key del usuario OCI.
+     `OCI_PRIVATE_KEY_PASSPHRASE` es opcional. La clave admite saltos reales
+     entre comillas o secuencias literales `\n`.
+   - `OCI_AUTH_MODE=config_file`: usar el archivo local `~/.oci/config`, o
+     `OCI_CONFIG_FILE` para otra ruta; `OCI_CONFIG_PROFILE` selecciona el perfil
+     (por defecto `DEFAULT`). En este modo no se requieren variables de API key.
+4. El usuario OCI debe tener permisos de creación de objetos en ese bucket y
+   eliminación para revertir metadatos cuando una carga es rechazada. Limitar
+   las políticas al bucket y compartimento correspondientes.
+5. Reiniciar `npm run dev` después de cambiar la configuración.
+
+`.env.local`, archivos PEM y claves están excluidos de Git. Nunca pegar claves
+privadas en el código, README ni respuestas de la API. La configuración se carga
+en el servidor, bajo demanda; la compilación no necesita credenciales.
+
+## Organización de los objetos recibidos
+
+```text
+mediflow-documentos-clinicos/
+└── recibidos/2026/09/DOC-CLIN-2026-1U0FNJ/
+    ├── DOC-CLIN-2026-1U0FNJ.jpg
+    └── DOC-CLIN-2026-1U0FNJ.metadata.json
+```
+
+Año y mes se toman de la fecha de recepción en UTC, no del identificador.
+El archivo binario conserva exactamente sus bytes; extensión y MIME se derivan
+de su firma validada (JPEG se normaliza a `.jpg` y TIFF a `.tiff`). El nombre
+original se guarda únicamente en los metadatos. Para JSON/texto se conserva
+el cuerpo JSON original de la petición, sin reformatearlo, como `<id>.json`.
+El ID generado para una petición JSON sin identificador queda en los metadatos
+y en la respuesta; no se modifica el original para insertarlo.
+
+`<documento_id>.metadata.json` utiliza la misma estructura para archivos y JSON/texto:
+`documento_id`, `canal_origen`, `tipo_archivo_detectado`, `tamano_bytes`,
+`recibido_en`, `nombre_original` y `almacenamiento_oci`, que contiene `bucket`
+y `ruta_objeto`. No incluye `content_type` ni `sha256`.
+
+### Organización provisional de prefijos en OCI
+
+El bucket `mediflow-documentos-clinicos` se organizará con los siguientes prefijos:
+
+| Prefijo | Contenido previsto | Estado |
+|--------|--------------------|--------|
+| `recibidos/` | Documentos originales y metadatos de recepción. | Implementado |
+| `procesados/` | Resultados de clasificación y extracción vinculados al documento. | Pendiente de implementación |
+| `auditoria/` | Registros de revisiones y decisiones humanas. | Pendiente de implementación |
+| `errores/` | Detalles de fallos de procesamiento vinculados al documento. | Pendiente de implementación |
+
+Esta distribución es una propuesta de organización para las siguientes etapas.
+Solo se utiliza `recibidos/` actualmente; los demás prefijos se incorporarán cuando
+existan los procesos que generen su contenido. En OCI son prefijos de los nombres
+de los objetos, por lo que no es necesario crear carpetas vacías previamente.
+
+El original permanecerá en `recibidos/`. Las etapas posteriores generarán archivos
+separados, relacionados mediante `documento_id`, sin mover ni modificar el original.
+El estado del procesamiento se registrará explícitamente cuando se implemente el
+seguimiento; no se deducirá únicamente del prefijo donde se encuentre el documento.
+
+### Confirmación, duplicados y fallos parciales
+
+La API devuelve `201` únicamente tras confirmar ambas escrituras. Se reserva
+primero `<documento_id>.metadata.json` mediante `If-None-Match: *` y después se escribe el
+original con la misma condición. Reutilizar un ID en el mismo período de
+recepción devuelve `409`, incluso si cambia el formato. No hay un índice global:
+el mismo ID enviado en otro mes puede crear otra carpeta. Los IDs generados
+usan un sufijo aleatorio de exactamente 6 caracteres alfanuméricos en mayúsculas,
+por ejemplo `DOC-CLIN-2026-1D5E63`. Los IDs suministrados en la entrada JSON deben
+respetar ese mismo formato. Un conflicto devuelve `409` sin sobrescribir objetos.
+
+Las dos escrituras no son una transacción. Si OCI rechaza definitivamente el
+original, se intenta eliminar solo la reserva de esta operación, condicionada
+por su ETag. Ante timeout o error de servidor, se conserva la reserva porque
+el original podría haberse escrito. No se realizan reintentos automáticos de
+escritura. Una interrupción o fallo de limpieza puede dejar objetos parciales:
+se deben comprobar original y metadata antes de reintentar; no se devuelve
+éxito y se registra solo el ID para conciliación. Esta versión no incluye
+conciliación automática ni debe activar procesamiento por la sola aparición
+de `<documento_id>.metadata.json`.
+
+Errores: `503` configuración ausente/inválida; `502` fallo o resultado incierto
+de OCI; `409` conflicto. No se exponen mensajes internos del SDK ni credenciales.
+`/api/ingest/salud` comprueba la aplicación, no la conexión con OCI.
+
+## Verificación
+
+```bash
+npm test
+npm run typecheck
+npm run build
+```
+
+Las pruebas usan un cliente OCI simulado y no suben información real.
+Para una comprobación real, configurar credenciales, cargar un documento
+sintético desde la interfaz y verificar en la consola OCI ambos objetos,
+el contenido original, `document_id`, tamaño y SHA-256 del metadata.
 
 ## Límite importante de Vercel
 
@@ -82,7 +187,10 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
   "tamano_bytes": 48213,
   "canal_origen": "Guardia_Emergencias",
   "recibido_en": "2026-09-26T21:27:25.262Z",
-  "ruta_objeto_temporal": "mediflow-documentos-clinicos/recibidos/DOC-CLIN-2026-A1B2C3_informe.pdf"
+  "almacenamiento_oci": {
+    "bucket": "mediflow-documentos-clinicos",
+    "ruta_objeto": "recibidos/2026/09/DOC-CLIN-2026-A1B2C3/DOC-CLIN-2026-A1B2C3.pdf"
+  }
 }
 ```
 
@@ -91,14 +199,16 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 ```json
 {
   "status": "rechazado",
-  "detalle": "El contenido del archivo no corresponde a ningún formato soportado (PDF, IMAGEN). Formatos aceptados: PDF, IMAGEN, JSON, TEXTO.",
-  "formatos_soportados": ["PDF", "IMAGEN", "JSON", "TEXTO"]
+  "detalle": "El contenido del archivo no corresponde a ningún formato soportado (PDF, IMAGEN, JSON).",
+  "formatos_soportados": ["PDF", "IMAGEN", "JSON"]
 }
 ```
 
 ## Siguiente paso en el pipeline
 
-Este servicio solo cubre **ingesta + validación**. La salida
-(`documento_id`, `ruta_objeto_temporal`) es el punto de entrada de la
+Las ubicaciones persistentes se devuelven en `almacenamiento_oci`.
+
+Este servicio solo cubre **ingesta + validación + persistencia OCI**. La salida
+(`documento_id`, `almacenamiento_oci.ruta_objeto`) es el punto de entrada de la
 siguiente etapa: clasificación por LLM → extracción estructurada → grafo
 de decisión condicional → enrutamiento.

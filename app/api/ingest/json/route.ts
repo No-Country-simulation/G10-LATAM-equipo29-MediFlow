@@ -1,6 +1,6 @@
 /**
  * POST /api/ingest/json — Ingiere un documento clínico como JSON/texto.
- * Corresponde 1:1 al ejemplo de solicitud del brief del hackathon.
+ * Conserva el cuerpo JSON original junto a los metadatos de recepción.
  */
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
@@ -11,10 +11,11 @@ import {
   MetadatoDocumento,
   ResultadoIngesta,
 } from "@/lib/types";
-import { persistirEnOciStub, persistirMetadatoStub } from "@/lib/storage";
+import { ErrorAlmacenamiento, persistirDocumentoRecibido } from "@/lib/storage";
 import {
   ArchivoDemasiadoGrandeError,
   FormatoNoSoportadoError,
+  TAMANO_MAXIMO_BYTES,
   validarTextoJson,
 } from "@/lib/validators";
 
@@ -22,8 +23,10 @@ export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   let cuerpo: unknown;
+  let contenidoOriginal: Uint8Array;
   try {
-    cuerpo = await request.json();
+    contenidoOriginal = new Uint8Array(await request.arrayBuffer());
+    cuerpo = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contenidoOriginal));
   } catch {
     return NextResponse.json(
       { status: "rechazado", detalle: "El body no es un JSON válido." },
@@ -46,14 +49,27 @@ export async function POST(request: Request) {
   const payload = parseo.data;
 
   try {
-    const { tamanoBytes } = validarTextoJson(payload.documento_texto);
+    validarTextoJson(payload.documento_texto);
+    let esJson = false;
+    try {
+      JSON.parse(payload.documento_texto);
+      esJson = true;
+    } catch {
+      // El contenido que no es JSON puede recibirse con la opción TEXTO.
+    }
+    if (payload.tipo_archivo === "JSON" && !esJson) {
+      throw new FormatoNoSoportadoError("documento_texto debe contener un JSON válido cuando tipo_archivo es JSON.");
+    }
+    if (payload.tipo_archivo === "TEXTO" && esJson) {
+      throw new FormatoNoSoportadoError("El contenido es JSON válido. Seleccione la opción JSON en lugar de TEXTO.");
+    }
+    if (contenidoOriginal.byteLength > TAMANO_MAXIMO_BYTES) {
+      throw new ArchivoDemasiadoGrandeError("El cuerpo JSON excede el máximo de 15 MiB.");
+    }
+    const tamanoBytes = contenidoOriginal.byteLength;
 
     const documentoId = payload.documento_id ?? generarDocumentoId();
     const nombreGuardado = `${documentoId}.json`;
-    const rutaObjeto = await persistirEnOciStub(
-      nombreGuardado,
-      JSON.stringify(payload),
-    );
     const recibidoEn = new Date().toISOString();
 
     const metadato: MetadatoDocumento = {
@@ -64,7 +80,9 @@ export async function POST(request: Request) {
       recibido_en: recibidoEn,
       nombre_original: nombreGuardado,
     };
-    await persistirMetadatoStub(nombreGuardado, metadato);
+    const almacenamiento = await persistirDocumentoRecibido({
+      contenido: contenidoOriginal, extension: "json", contentType: "application/json", metadato,
+    });
 
     const resultado: ResultadoIngesta = {
       status: "recibido",
@@ -73,11 +91,14 @@ export async function POST(request: Request) {
       tamano_bytes: tamanoBytes,
       canal_origen: payload.canal_origen,
       recibido_en: recibidoEn,
-      ruta_objeto_temporal: rutaObjeto,
+      almacenamiento_oci: almacenamiento,
     };
 
     return NextResponse.json(resultado, { status: 201 });
   } catch (error) {
+    if (error instanceof ErrorAlmacenamiento) {
+      return NextResponse.json({ status: "rechazado", detalle: error.message }, { status: error.status });
+    }
     if (error instanceof FormatoNoSoportadoError) {
       return NextResponse.json(
         { status: "rechazado", detalle: error.message },

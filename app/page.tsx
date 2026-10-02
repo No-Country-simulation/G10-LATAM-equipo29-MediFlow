@@ -80,7 +80,7 @@ export default function Pagina() {
           className={`tab ${tab === "archivo" ? "activa" : ""}`}
           onClick={() => setTab("archivo")}
         >
-          📄 Subir archivo (PDF/Imagen)
+          📄 Subir archivo (PDF/Imagen/JSON)
         </button>
         <button
           className={`tab ${tab === "json" ? "activa" : ""}`}
@@ -96,7 +96,7 @@ export default function Pagina() {
           <input
             id="archivo"
             type="file"
-            accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.webp"
+            accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.webp,.json"
             onChange={(e) => setArchivo(e.target.files?.[0] ?? null)}
           />
 

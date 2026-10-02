@@ -2,6 +2,7 @@
  * types.ts — Tipos y esquemas de la etapa de INGESTA de MediFlow.
  * Equivalente TypeScript de models.py (versión FastAPI).
  */
+import { randomInt } from "node:crypto";
 import { z } from "zod";
 
 export const TipoArchivo = {
@@ -32,19 +33,19 @@ export function validarCanalOrigen(valor: string | null): CanalOrigen | null {
   return CANALES_VALIDOS.has(valor) ? (valor as CanalOrigen) : null;
 }
 
-const DOC_ID_PATTERN = /^DOC-CLIN-\d{4}-[A-Za-z0-9]{4,}$/;
+export const DOC_ID_PATTERN = /^DOC-CLIN-\d{4}-[A-Z0-9]{6}$/;
 
 export function generarDocumentoId(): string {
   const anio = new Date().getUTCFullYear();
-  const sufijo = Math.random().toString(36).slice(2, 8).toUpperCase();
+  const sufijo = randomInt(36 ** 6).toString(36).padStart(6, "0").toUpperCase();
   return `DOC-CLIN-${anio}-${sufijo}`;
 }
 
-/** Payload aceptado en POST /api/ingest/json — 1:1 con el ejemplo del brief. */
+/** Payload de ingesta JSON/texto. */
 export const DocumentoClinicoEntradaSchema = z.object({
   documento_id: z
     .string()
-    .regex(DOC_ID_PATTERN, "documento_id debe seguir el formato DOC-CLIN-YYYY-XXXX")
+    .regex(DOC_ID_PATTERN, "documento_id debe seguir el formato DOC-CLIN-YYYY-XXXXXX (6 caracteres: letras mayúsculas o números)")
     .optional(),
   tipo_archivo: z.enum(["JSON", "TEXTO"]),
   documento_texto: z
@@ -72,11 +73,14 @@ export interface ResultadoIngesta {
   tamano_bytes: number;
   canal_origen: CanalOrigen;
   recibido_en: string;
-  ruta_objeto_temporal: string;
+  almacenamiento_oci: {
+    bucket: string;
+    ruta_objeto: string;
+  };
 }
 
-/** Metadatos básicos de entrada persistidos junto al documento (sidecar
- * *.metadata.json) — permite que cualquier etapa posterior (clasificación,
+/** Metadatos básicos de entrada persistidos junto al documento (<documento_id>.metadata.json)
+ * — permite que cualquier etapa posterior (clasificación,
  * auditoría humana) sepa documento_id/canal_origen/recibido_en leyendo
  * directamente el storage, sin depender de la respuesta HTTP original. */
 export interface MetadatoDocumento {

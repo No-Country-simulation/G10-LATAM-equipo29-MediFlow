@@ -7,7 +7,7 @@
  *   3) Firma binaria real de los primeros bytes (magic numbers).
  *
  * Formatos estrictamente soportados: PDF, IMAGEN (jpg/png/tiff/webp),
- * JSON/TEXTO (validado aparte, ver validarTextoJson).
+ * JSON (UTF-8 y sintaxis válida) y TEXTO (ver validarTextoJson).
  */
 import { TipoArchivo } from "./types";
 
@@ -69,7 +69,7 @@ function detectarPorFirmaBinaria(bytes: Uint8Array): TipoArchivo | null {
   return null;
 }
 
-/** Valida un archivo subido (PDF o IMAGEN) contra las tres señales disponibles. */
+/** Valida un archivo subido (PDF, IMAGEN o JSON) contra las señales disponibles. */
 export function validarArchivo(
   nombreArchivo: string,
   contentType: string | null,
@@ -88,12 +88,22 @@ export function validarArchivo(
 
   const tipoExt = detectarPorExtension(nombreArchivo);
   const tipoMime = detectarPorContentType(contentType);
-  const tipoFirma = detectarPorFirmaBinaria(contenido.subarray(0, 16));
+  let tipoFirma = detectarPorFirmaBinaria(contenido.subarray(0, 16));
+  if (tipoFirma === null) {
+    try {
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contenido));
+      tipoFirma = "JSON";
+    } catch {
+      if (tipoExt === "JSON" || tipoMime === "JSON") {
+        throw new FormatoNoSoportadoError("El archivo debe contener JSON válido codificado en UTF-8.");
+      }
+    }
+  }
 
   if (tipoFirma === null) {
     throw new FormatoNoSoportadoError(
       "El contenido del archivo no corresponde a ningún formato soportado " +
-        `(PDF, IMAGEN). Formatos aceptados: ${Object.values(TipoArchivo).join(", ")}.`,
+        "(PDF, IMAGEN, JSON).",
     );
   }
 
