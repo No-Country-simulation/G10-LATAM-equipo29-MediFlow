@@ -19,13 +19,17 @@ export class ErrorAlmacenamiento extends Error {
   }
 }
 
-type ClienteStorage = Pick<
+type ClienteEscritura = Pick<
   ObjectStorageClient,
   "putObject" | "deleteObject"
 >;
 
-type Conexion = {
-  cliente: ClienteStorage;
+type ClienteLectura = Pick<ObjectStorageClient, "getObject">;
+
+type ClienteStorage = ClienteEscritura & ClienteLectura;
+
+type Conexion<Cliente = ClienteStorage> = {
+  cliente: Cliente;
   namespace: string;
 };
 
@@ -142,7 +146,7 @@ interface EntradaPersistencia {
 
 export async function persistirDocumentoRecibido(
   entrada: EntradaPersistencia,
-  obtenerConexion: () => Conexion = obtenerConexionOci,
+  obtenerConexion: () => Conexion<ClienteEscritura> = obtenerConexionOci,
 ) {
   const { metadato, extension, contentType } = entrada;
 
@@ -272,4 +276,175 @@ export async function persistirDocumentoRecibido(
   }
 
   return almacenamiento;
+}
+/**
+ * Ruta de un original recibido:
+ * recibidos/AAAA/MM/<id>/<id>.<extensión>
+ * El ID de la carpeta y el del archivo deben coincidir.
+ */
+const RUTA_RECIBIDO =
+  /^recibidos\/(\d{4})\/(\d{2})\/(DOC-CLIN-\d{4}-[A-Z0-9]{6})\/(DOC-CLIN-\d{4}-[A-Z0-9]{6})\.(pdf|jpg|png|tiff|webp|json)$/;
+
+export interface RutaRecibido {
+  anio: string;
+  mes: string;
+  extension: string;
+}
+
+/**
+ * Valida que `rutaObjeto` apunte al original de `documentoId`.
+ * Evita que la API lea objetos arbitrarios del bucket.
+ */
+export function analizarRutaRecibido(
+  documentoId: string,
+  rutaObjeto: string,
+): RutaRecibido {
+  const coincidencia = RUTA_RECIBIDO.exec(rutaObjeto);
+
+  if (
+    !coincidencia ||
+    coincidencia[3] !== documentoId ||
+    coincidencia[4] !== documentoId
+  ) {
+    throw new ErrorAlmacenamiento(
+      422,
+      "ruta_objeto no corresponde al original recibido de este documento_id.",
+    );
+  }
+
+  return {
+    anio: coincidencia[1],
+    mes: coincidencia[2],
+    extension: coincidencia[5],
+  };
+}
+
+async function leerFlujo(
+  flujo: unknown,
+  limiteBytes: number,
+): Promise<Uint8Array> {
+  const partes: Uint8Array[] = [];
+  let total = 0;
+
+  const acumular = (parte: Uint8Array) => {
+    total += parte.byteLength;
+
+    if (total > limiteBytes) {
+      throw new ErrorAlmacenamiento(
+        413,
+        "El documento almacenado excede el tamaño máximo permitido.",
+      );
+    }
+
+    partes.push(parte);
+  };
+
+  if (flujo && typeof (flujo as ReadableStream).getReader === "function") {
+    const lector = (flujo as ReadableStream<Uint8Array>).getReader();
+
+    for (;;) {
+      const { done, value } = await lector.read();
+      if (done) break;
+      acumular(value);
+    }
+  } else {
+    for await (const parte of flujo as AsyncIterable<Uint8Array | string>) {
+      acumular(typeof parte === "string" ? Buffer.from(parte) : parte);
+    }
+  }
+
+  return Buffer.concat(partes);
+}
+
+/**
+ * Lee el original recibido desde OCI. No modifica nada en el bucket.
+ */
+export async function leerDocumentoRecibido(
+  documentoId: string,
+  rutaObjeto: string,
+  limiteBytes: number,
+  obtenerConexion: () => Conexion<ClienteLectura> = obtenerConexionOci,
+): Promise<{ contenido: Uint8Array; extension: string; ruta: RutaRecibido }> {
+  const ruta = analizarRutaRecibido(documentoId, rutaObjeto);
+  const { cliente, namespace } = obtenerConexion();
+
+  try {
+    const respuesta = await cliente.getObject({
+      namespaceName: namespace,
+      bucketName: BUCKET_DOCUMENTOS,
+      objectName: rutaObjeto,
+      retryConfiguration: NoRetryConfigurationDetails,
+    });
+
+    if (respuesta.contentLength > limiteBytes) {
+      throw new ErrorAlmacenamiento(
+        413,
+        "El documento almacenado excede el tamaño máximo permitido.",
+      );
+    }
+
+    const contenido = await leerFlujo(respuesta.value, limiteBytes);
+
+    return { contenido, extension: ruta.extension, ruta };
+  } catch (error) {
+    if (error instanceof ErrorAlmacenamiento) throw error;
+
+    const codigo = (error as { statusCode?: number })?.statusCode;
+
+    if (codigo === 404) {
+      throw new ErrorAlmacenamiento(
+        404,
+        "No existe un documento recibido con esa ruta.",
+      );
+    }
+
+    console.error("OCI: fallo al leer documento", documentoId);
+
+    throw new ErrorAlmacenamiento(
+      502,
+      "No se pudo leer el documento desde OCI.",
+    );
+  }
+}
+
+/**
+ * Guarda el resultado de una etapa posterior en `procesados/`, junto al
+ * mismo AAAA/MM del original. El original no se toca. Se permite
+ * sobrescribir para poder reclasificar un documento.
+ */
+export async function persistirResultadoProcesado(
+  documentoId: string,
+  ruta: RutaRecibido,
+  sufijo: "clasificacion",
+  resultado: unknown,
+  obtenerConexion: () => Conexion<Pick<ObjectStorageClient, "putObject">> =
+    obtenerConexionOci,
+) {
+  const rutaObjeto =
+    `procesados/${ruta.anio}/${ruta.mes}/${documentoId}/` +
+    `${documentoId}.${sufijo}.json`;
+
+  const cuerpo = Buffer.from(JSON.stringify(resultado, null, 2));
+  const { cliente, namespace } = obtenerConexion();
+
+  try {
+    await cliente.putObject({
+      namespaceName: namespace,
+      bucketName: BUCKET_DOCUMENTOS,
+      objectName: rutaObjeto,
+      putObjectBody: cuerpo,
+      contentLength: cuerpo.byteLength,
+      contentType: "application/json",
+      retryConfiguration: NoRetryConfigurationDetails,
+    });
+  } catch {
+    console.error("OCI: no se pudo guardar resultado", documentoId, sufijo);
+
+    throw new ErrorAlmacenamiento(
+      502,
+      "No se pudo confirmar el guardado del resultado en OCI.",
+    );
+  }
+
+  return { bucket: BUCKET_DOCUMENTOS, ruta_objeto: rutaObjeto };
 }
