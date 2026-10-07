@@ -12,6 +12,8 @@
 import { TipoArchivo } from "./types";
 
 export const TAMANO_MAXIMO_BYTES = 15 * 1024 * 1024; // 15 MB por documento clínico
+/** Tope al releer un original desde OCI (etapas posteriores a la ingesta). */
+export const MAX_BYTES_LECTURA = TAMANO_MAXIMO_BYTES;
 
 export class FormatoNoSoportadoError extends Error {}
 export class ArchivoInconsistenteError extends Error {}
