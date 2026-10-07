@@ -92,6 +92,16 @@ export interface MetadatoDocumento {
   nombre_original: string;
 }
 
+/** Payload de POST /api/classify: lo que devolvió la ingesta
+ * (`documento_id` y `almacenamiento_oci.ruta_objeto`). */
+export const ClasificarEntradaSchema = z.object({
+  documento_id: z
+    .string()
+    .regex(DOC_ID_PATTERN, "documento_id debe seguir el formato DOC-CLIN-YYYY-XXXXXX"),
+  ruta_objeto: z.string().min(1, "ruta_objeto es obligatorio").max(256),
+});
+export type ClasificarEntrada = z.infer<typeof ClasificarEntradaSchema>;
+
 export interface ErrorIngesta {
   status: "rechazado";
   detalle: string;
