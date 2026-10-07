@@ -29,10 +29,12 @@ app/
   api/ingest/file/route.ts    → POST — sube PDF, IMAGEN o JSON (multipart/form-data)
   api/ingest/json/route.ts    → POST — envía JSON/texto (application/json)
   api/ingest/salud/route.ts   → GET  — healthcheck
+  api/classify/route.ts       → POST — clasifica por categoría un documento ya ingerido (Gemini)
 lib/
   types.ts                    → enums, esquema Zod, contrato ResultadoIngesta
   validators.ts                → validación en 3 capas (extensión + MIME + firma binaria)
   storage.ts                    → persistencia real con el SDK de OCI Object Storage
+  clasificacion.ts              → clasificación multimodal con Gemini (categorías, prompt, validación)
 ```
 
 ## Ejecutar localmente
@@ -109,7 +111,7 @@ El bucket `mediflow-documentos-clinicos` se organizará con los siguientes prefi
 | Prefijo | Contenido previsto | Estado |
 |--------|--------------------|--------|
 | `recibidos/` | Documentos originales y metadatos de recepción. | Implementado |
-| `procesados/` | Resultados de clasificación y extracción vinculados al documento. | Pendiente de implementación |
+| `procesados/` | Resultados de clasificación y extracción vinculados al documento. | Clasificación implementada; extracción pendiente |
 | `auditoria/` | Registros de revisiones y decisiones humanas. | Pendiente de implementación |
 | `errores/` | Detalles de fallos de procesamiento vinculados al documento. | Pendiente de implementación |
 
@@ -176,6 +178,7 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 | POST   | `/api/ingest/file`    | `multipart/form-data`: `archivo` (File), `canal_origen` (opcional) |
 | POST   | `/api/ingest/json`    | `application/json`: `{ tipo_archivo, documento_texto, canal_origen? }` |
 | GET    | `/api/ingest/salud`   | Healthcheck                                    |
+| POST   | `/api/classify`       | `application/json`: `{ documento_id, ruta_objeto }` — clasifica el documento con Gemini |
 
 ### Ejemplo de respuesta exitosa (`201`)
 
@@ -204,11 +207,67 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 }
 ```
 
+## Clasificación con Gemini
+
+`POST /api/classify` toma la salida de la ingesta (`documento_id` y
+`almacenamiento_oci.ruta_objeto`), lee el original desde OCI Object Storage,
+lo envía a Gemini (multimodal: PDF, imagen o texto/JSON) y devuelve la categoría.
+La pantalla de recepción lo invoca automáticamente después de cada ingesta exitosa.
+
+Configuración (solo servidor, nunca `NEXT_PUBLIC_`):
+
+| Variable | Descripción |
+|----------|-------------|
+| `GEMINI_API_KEY` | Clave de Google AI Studio. Sin ella, la API devuelve `503`. |
+| `GEMINI_MODEL` | Opcional. Por defecto `gemini-3.5-flash-lite`. |
+
+Categorías (`CATEGORIAS_DOCUMENTO` en `lib/clasificacion.ts`; para agregar o
+cambiar una basta editar ese arreglo y su descripción, el prompt se genera de ahí):
+`RECETA_MEDICA`, `RESULTADO_LABORATORIO`, `INFORME_IMAGENOLOGIA`,
+`HISTORIA_CLINICA`, `RESUMEN_ALTA`, `ORDEN_MEDICA`, `CERTIFICADO_MEDICO`,
+`CONSENTIMIENTO_INFORMADO`, `DOCUMENTO_ADMINISTRATIVO` y `OTRO`.
+
+Ejemplo de respuesta (`200`):
+
+```json
+{
+  "status": "clasificado",
+  "documento_id": "DOC-CLIN-2026-A1B2C3",
+  "categoria": "RECETA_MEDICA",
+  "confianza": 0.93,
+  "justificacion": "Contiene prescripción de medicamentos con dosis.",
+  "requiere_revision_humana": false,
+  "modelo": "gemini-3.5-flash-lite",
+  "clasificado_en": "2026-10-05T21:30:00.000Z",
+  "resultado_oci": {
+    "bucket": "mediflow-documentos-clinicos",
+    "ruta_objeto": "procesados/2026/09/DOC-CLIN-2026-A1B2C3/DOC-CLIN-2026-A1B2C3.clasificacion.json"
+  }
+}
+```
+
+- La salida de Gemini se fuerza a JSON con esquema y se vuelve a validar con
+  Zod; una respuesta inválida devuelve `502` sin exponer su contenido.
+- `requiere_revision_humana` es `true` si `confianza < 0.7` o la categoría es
+  `OTRO` (casos ambiguos para el flujo con revisión humana).
+- `ruta_objeto` debe ser exactamente el original recibido de ese `documento_id`
+  (`recibidos/AAAA/MM/<id>/<id>.<ext>`); cualquier otra ruta se rechaza con `422`
+  antes de tocar OCI, para no leer objetos arbitrarios del bucket.
+- El resultado se guarda en `procesados/AAAA/MM/<id>/<id>.clasificacion.json`.
+  El original no se modifica. Reclasificar sobrescribe ese archivo.
+- El contenido del documento se trata como datos: el prompt indica ignorar
+  instrucciones incluidas dentro del documento.
+- Errores: `404` el original no existe; `413` documento demasiado grande
+  (máximo 14 MiB para enviarlo a Gemini); `415` TIFF (Gemini no lo admite;
+  convertir a PDF/PNG/JPEG); `502` fallo de Gemini u OCI; `503` configuración ausente.
+- El documento se envía a la API de Gemini. Usar solo documentos sintéticos
+  hasta definir las condiciones de privacidad para datos reales de pacientes.
+
 ## Siguiente paso en el pipeline
 
 Las ubicaciones persistentes se devuelven en `almacenamiento_oci`.
 
-Este servicio solo cubre **ingesta + validación + persistencia OCI**. La salida
-(`documento_id`, `almacenamiento_oci.ruta_objeto`) es el punto de entrada de la
-siguiente etapa: clasificación por LLM → extracción estructurada → grafo
-de decisión condicional → enrutamiento.
+Cubre **ingesta + validación + persistencia OCI + clasificación por LLM**. Las
+salidas (`documento_id`, `almacenamiento_oci.ruta_objeto`, `categoria`,
+`requiere_revision_humana`) son el punto de entrada de la siguiente etapa:
+extracción estructurada → grafo de decisión condicional → enrutamiento.
