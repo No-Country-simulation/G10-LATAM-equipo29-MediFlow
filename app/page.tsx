@@ -11,7 +11,28 @@ const CANALES = [
   "Otro",
 ];
 
-type Resultado = { ok: boolean; body: unknown };
+type Resultado = { ok: boolean; body: unknown; clasificacion?: Resultado };
+
+/** Clasifica automáticamente un documento recién ingerido (usa la salida de la ingesta). */
+async function clasificar(ingesta: unknown): Promise<Resultado> {
+  const { documento_id, almacenamiento_oci } = ingesta as {
+    documento_id: string;
+    almacenamiento_oci: { ruta_objeto: string };
+  };
+  try {
+    const respuesta = await fetch("/api/classify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        documento_id,
+        ruta_objeto: almacenamiento_oci.ruta_objeto,
+      }),
+    });
+    return { ok: respuesta.ok, body: await respuesta.json() };
+  } catch (error) {
+    return { ok: false, body: { detalle: String(error) } };
+  }
+}
 
 export default function Pagina() {
   const [tab, setTab] = useState<"archivo" | "json">("archivo");
@@ -38,7 +59,11 @@ export default function Pagina() {
       formData.append("archivo", archivo);
       formData.append("canal_origen", canalArchivo);
       const respuesta = await fetch("/api/ingest/file", { method: "POST", body: formData });
-      setResultadoArchivo({ ok: respuesta.ok, body: await respuesta.json() });
+      const ingesta: Resultado = { ok: respuesta.ok, body: await respuesta.json() };
+      setResultadoArchivo(ingesta);
+      if (ingesta.ok) {
+        setResultadoArchivo({ ...ingesta, clasificacion: await clasificar(ingesta.body) });
+      }
     } catch (error) {
       setResultadoArchivo({ ok: false, body: { detalle: String(error) } });
     } finally {
@@ -60,7 +85,11 @@ export default function Pagina() {
           canal_origen: canalJson,
         }),
       });
-      setResultadoJson({ ok: respuesta.ok, body: await respuesta.json() });
+      const ingesta: Resultado = { ok: respuesta.ok, body: await respuesta.json() };
+      setResultadoJson(ingesta);
+      if (ingesta.ok) {
+        setResultadoJson({ ...ingesta, clasificacion: await clasificar(ingesta.body) });
+      }
     } catch (error) {
       setResultadoJson({ ok: false, body: { detalle: String(error) } });
     } finally {
@@ -118,12 +147,17 @@ export default function Pagina() {
             disabled={!archivo || enviandoArchivo}
             onClick={enviarArchivo}
           >
-            {enviandoArchivo ? "Enviando..." : "Enviar archivo"}
+            {enviandoArchivo ? "Enviando y clasificando..." : "Enviar archivo"}
           </button>
 
           {resultadoArchivo && (
             <div className={`resultado ${resultadoArchivo.ok ? "ok" : "error"}`}>
               {JSON.stringify(resultadoArchivo.body, null, 2)}
+            </div>
+          )}
+          {resultadoArchivo?.clasificacion && (
+            <div className={`resultado ${resultadoArchivo.clasificacion.ok ? "ok" : "error"}`}>
+              {"Clasificación:\n" + JSON.stringify(resultadoArchivo.clasificacion.body, null, 2)}
             </div>
           )}
         </div>
@@ -164,12 +198,17 @@ export default function Pagina() {
           </select>
 
           <button className="enviar" disabled={!texto.trim() || enviandoJson} onClick={enviarJson}>
-            {enviandoJson ? "Enviando..." : "Enviar JSON"}
+            {enviandoJson ? "Enviando y clasificando..." : "Enviar JSON"}
           </button>
 
           {resultadoJson && (
             <div className={`resultado ${resultadoJson.ok ? "ok" : "error"}`}>
               {JSON.stringify(resultadoJson.body, null, 2)}
+            </div>
+          )}
+          {resultadoJson?.clasificacion && (
+            <div className={`resultado ${resultadoJson.clasificacion.ok ? "ok" : "error"}`}>
+              {"Clasificación:\n" + JSON.stringify(resultadoJson.clasificacion.body, null, 2)}
             </div>
           )}
         </div>
