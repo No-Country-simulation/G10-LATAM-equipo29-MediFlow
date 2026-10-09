@@ -16,7 +16,7 @@ archivo o el `Content-Type` intentan simular uno soportado (ver
 Vercel ejecuta **funciones serverless**: cada request instancia (y luego
 destruye) el proceso. Streamlit necesita un proceso persistente con
 WebSockets abierto, lo que **no es compatible con Vercel**. Next.js con
-App Router sí es 100% nativo de Vercel: los *Route Handlers* usan la Web
+App Router sí es 100% nativo de Vercel: los _Route Handlers_ usan la Web
 API `Request`/`Response` estándar y `request.formData()` para manejar
 `multipart/form-data` sin librerías adicionales (`formidable`, `busboy`,
 etc.).
@@ -108,12 +108,12 @@ y `ruta_objeto`. No incluye `content_type` ni `sha256`.
 
 El bucket `mediflow-documentos-clinicos` se organizará con los siguientes prefijos:
 
-| Prefijo | Contenido previsto | Estado |
-|--------|--------------------|--------|
-| `recibidos/` | Documentos originales y metadatos de recepción. | Implementado |
+| Prefijo       | Contenido previsto                                                | Estado                                           |
+| ------------- | ----------------------------------------------------------------- | ------------------------------------------------ |
+| `recibidos/`  | Documentos originales y metadatos de recepción.                   | Implementado                                     |
 | `procesados/` | Resultados de clasificación y extracción vinculados al documento. | Clasificación implementada; extracción pendiente |
-| `auditoria/` | Registros de revisiones y decisiones humanas. | Pendiente de implementación |
-| `errores/` | Detalles de fallos de procesamiento vinculados al documento. | Pendiente de implementación |
+| `auditoria/`  | Registros de revisiones y decisiones humanas.                     | Pendiente de implementación                      |
+| `errores/`    | Detalles de fallos de procesamiento vinculados al documento.      | Pendiente de implementación                      |
 
 Esta distribución es una propuesta de organización para las siguientes etapas.
 Solo se utiliza `recibidos/` actualmente; los demás prefijos se incorporarán cuando
@@ -173,12 +173,13 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 
 ## Endpoints
 
-| Método | Ruta                  | Descripción                                  |
-|--------|-----------------------|-----------------------------------------------|
-| POST   | `/api/ingest/file`    | `multipart/form-data`: `archivo` (File), `canal_origen` (opcional) |
-| POST   | `/api/ingest/json`    | `application/json`: `{ tipo_archivo, documento_texto, canal_origen? }` |
-| GET    | `/api/ingest/salud`   | Healthcheck                                    |
-| POST   | `/api/classify`       | `application/json`: `{ documento_id, ruta_objeto }` — clasifica el documento con Gemini |
+| Método | Ruta                   | Descripción                                                                                                                                                                         |
+| ------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/api/ingest/file`     | `multipart/form-data`: `archivo` (File), `canal_origen` (opcional)                                                                                                                  |
+| POST   | `/api/ingest/json`     | `application/json`: `{ tipo_archivo, documento_texto, canal_origen? }`                                                                                                              |
+| GET    | `/api/ingest/salud`    | Healthcheck                                                                                                                                                                         |
+| POST   | `/api/ingest/classify` | `application/json`: `{ documento_id, ruta_objeto }` — clasifica el documento con Gemini                                                                                             |
+| POST   | `/api/ingest/route`    | `application/json`: `{ documento_id, categoria, confianza, requiere_revision_humana, canal_origen?, destinos_no_disponibles? }` — aplica grafo de decisión, enrutamiento y fallback |
 
 ### Ejemplo de respuesta exitosa (`201`)
 
@@ -209,17 +210,17 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 
 ## Clasificación con Gemini
 
-`POST /api/classify` toma la salida de la ingesta (`documento_id` y
+`POST /api/ingest/classify` toma la salida de la ingesta (`documento_id` y
 `almacenamiento_oci.ruta_objeto`), lee el original desde OCI Object Storage,
 lo envía a Gemini (multimodal: PDF, imagen o texto/JSON) y devuelve la categoría.
 La pantalla de recepción lo invoca automáticamente después de cada ingesta exitosa.
 
 Configuración (solo servidor, nunca `NEXT_PUBLIC_`):
 
-| Variable | Descripción |
-|----------|-------------|
+| Variable         | Descripción                                                 |
+| ---------------- | ----------------------------------------------------------- |
 | `GEMINI_API_KEY` | Clave de Google AI Studio. Sin ella, la API devuelve `503`. |
-| `GEMINI_MODEL` | Opcional. Por defecto `gemini-3.5-flash-lite`. |
+| `GEMINI_MODEL`   | Opcional. Por defecto `gemini-3.5-flash-lite`.              |
 
 Categorías (`CATEGORIAS_DOCUMENTO` en `lib/clasificacion.ts`; para agregar o
 cambiar una basta editar ese arreglo y su descripción, el prompt se genera de ahí):

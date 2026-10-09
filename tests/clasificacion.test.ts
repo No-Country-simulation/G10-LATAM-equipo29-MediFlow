@@ -18,7 +18,7 @@ import {
   leerDocumentoRecibido,
   persistirResultadoProcesado,
 } from "../lib/storage";
-import { POST as clasificar } from "../app/api/classify/route";
+import { POST as clasificar } from "../app/api/ingest/classify/route";
 
 const id = "DOC-CLIN-2026-1U0FNJ";
 const rutaPdf = `recibidos/2026/09/${id}/${id}.pdf`;

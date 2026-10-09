@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit --incremental false"
   },
   "dependencies": {
+    "@google/genai": "^1.29.0",
     "next": "^16.3.7",
     "oci-common": "^2.142.1",
     "oci-objectstorage": "^2.142.1",

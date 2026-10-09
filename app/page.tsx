@@ -11,7 +11,12 @@ const CANALES = [
   "Otro",
 ];
 
-type Resultado = { ok: boolean; body: unknown; clasificacion?: Resultado };
+type Resultado = {
+  ok: boolean;
+  body: unknown;
+  clasificacion?: Resultado;
+  enrutamiento?: Resultado;
+};
 
 /** Clasifica automáticamente un documento recién ingerido (usa la salida de la ingesta). */
 async function clasificar(ingesta: unknown): Promise<Resultado> {
@@ -20,12 +25,57 @@ async function clasificar(ingesta: unknown): Promise<Resultado> {
     almacenamiento_oci: { ruta_objeto: string };
   };
   try {
-    const respuesta = await fetch("/api/classify", {
+    const respuesta = await fetch("/api/ingest/classify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         documento_id,
         ruta_objeto: almacenamiento_oci.ruta_objeto,
+      }),
+    });
+    return { ok: respuesta.ok, body: await respuesta.json() };
+  } catch (error) {
+    return { ok: false, body: { detalle: String(error) } };
+  }
+}
+
+/** Enruta automáticamente según categoría y reglas condicionales. */
+async function enrutar(
+  clasificacion: unknown,
+  ingesta: unknown,
+): Promise<Resultado> {
+  const datosClasificacion = clasificacion as {
+    documento_id?: string;
+    categoria?: string;
+    confianza?: number;
+    requiere_revision_humana?: boolean;
+  };
+  const datosIngesta = ingesta as { canal_origen?: string };
+
+  if (
+    !datosClasificacion.documento_id ||
+    !datosClasificacion.categoria ||
+    typeof datosClasificacion.confianza !== "number" ||
+    typeof datosClasificacion.requiere_revision_humana !== "boolean"
+  ) {
+    return {
+      ok: false,
+      body: {
+        detalle: "No se pudo enrutar: faltan datos de clasificación válidos.",
+      },
+    };
+  }
+
+  try {
+    const respuesta = await fetch("/api/ingest/route", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        documento_id: datosClasificacion.documento_id,
+        categoria: datosClasificacion.categoria,
+        confianza: datosClasificacion.confianza,
+        requiere_revision_humana: datosClasificacion.requiere_revision_humana,
+        canal_origen: datosIngesta.canal_origen,
       }),
     });
     return { ok: respuesta.ok, body: await respuesta.json() };
@@ -40,7 +90,9 @@ export default function Pagina() {
   // --- estado: pestaña archivo ---
   const [archivo, setArchivo] = useState<File | null>(null);
   const [canalArchivo, setCanalArchivo] = useState("Otro");
-  const [resultadoArchivo, setResultadoArchivo] = useState<Resultado | null>(null);
+  const [resultadoArchivo, setResultadoArchivo] = useState<Resultado | null>(
+    null,
+  );
   const [enviandoArchivo, setEnviandoArchivo] = useState(false);
 
   // --- estado: pestaña JSON/texto ---
@@ -54,16 +106,36 @@ export default function Pagina() {
     if (!archivo) return;
     setEnviandoArchivo(true);
     setResultadoArchivo(null);
+
     try {
       const formData = new FormData();
       formData.append("archivo", archivo);
       formData.append("canal_origen", canalArchivo);
-      const respuesta = await fetch("/api/ingest/file", { method: "POST", body: formData });
-      const ingesta: Resultado = { ok: respuesta.ok, body: await respuesta.json() };
-      setResultadoArchivo(ingesta);
-      if (ingesta.ok) {
-        setResultadoArchivo({ ...ingesta, clasificacion: await clasificar(ingesta.body) });
+
+      const respuesta = await fetch("/api/ingest/file", {
+        method: "POST",
+        body: formData,
+      });
+      const ingesta: Resultado = {
+        ok: respuesta.ok,
+        body: await respuesta.json(),
+      };
+
+      if (!ingesta.ok) {
+        setResultadoArchivo(ingesta);
+        return;
       }
+
+      const resultadoClasificacion = await clasificar(ingesta.body);
+      const resultadoEnrutamiento = resultadoClasificacion.ok
+        ? await enrutar(resultadoClasificacion.body, ingesta.body)
+        : undefined;
+
+      setResultadoArchivo({
+        ...ingesta,
+        clasificacion: resultadoClasificacion,
+        enrutamiento: resultadoEnrutamiento,
+      });
     } catch (error) {
       setResultadoArchivo({ ok: false, body: { detalle: String(error) } });
     } finally {
@@ -75,6 +147,7 @@ export default function Pagina() {
     if (!texto.trim()) return;
     setEnviandoJson(true);
     setResultadoJson(null);
+
     try {
       const respuesta = await fetch("/api/ingest/json", {
         method: "POST",
@@ -85,11 +158,26 @@ export default function Pagina() {
           canal_origen: canalJson,
         }),
       });
-      const ingesta: Resultado = { ok: respuesta.ok, body: await respuesta.json() };
-      setResultadoJson(ingesta);
-      if (ingesta.ok) {
-        setResultadoJson({ ...ingesta, clasificacion: await clasificar(ingesta.body) });
+      const ingesta: Resultado = {
+        ok: respuesta.ok,
+        body: await respuesta.json(),
+      };
+
+      if (!ingesta.ok) {
+        setResultadoJson(ingesta);
+        return;
       }
+
+      const resultadoClasificacion = await clasificar(ingesta.body);
+      const resultadoEnrutamiento = resultadoClasificacion.ok
+        ? await enrutar(resultadoClasificacion.body, ingesta.body)
+        : undefined;
+
+      setResultadoJson({
+        ...ingesta,
+        clasificacion: resultadoClasificacion,
+        enrutamiento: resultadoEnrutamiento,
+      });
     } catch (error) {
       setResultadoJson({ ok: false, body: { detalle: String(error) } });
     } finally {
@@ -147,17 +235,32 @@ export default function Pagina() {
             disabled={!archivo || enviandoArchivo}
             onClick={enviarArchivo}
           >
-            {enviandoArchivo ? "Enviando y clasificando..." : "Enviar archivo"}
+            {enviandoArchivo
+              ? "Enviando, clasificando y enrutando..."
+              : "Enviar archivo"}
           </button>
 
           {resultadoArchivo && (
-            <div className={`resultado ${resultadoArchivo.ok ? "ok" : "error"}`}>
+            <div
+              className={`resultado ${resultadoArchivo.ok ? "ok" : "error"}`}
+            >
               {JSON.stringify(resultadoArchivo.body, null, 2)}
             </div>
           )}
           {resultadoArchivo?.clasificacion && (
-            <div className={`resultado ${resultadoArchivo.clasificacion.ok ? "ok" : "error"}`}>
-              {"Clasificación:\n" + JSON.stringify(resultadoArchivo.clasificacion.body, null, 2)}
+            <div
+              className={`resultado ${resultadoArchivo.clasificacion.ok ? "ok" : "error"}`}
+            >
+              {"Clasificación:\n" +
+                JSON.stringify(resultadoArchivo.clasificacion.body, null, 2)}
+            </div>
+          )}
+          {resultadoArchivo?.enrutamiento && (
+            <div
+              className={`resultado ${resultadoArchivo.enrutamiento.ok ? "ok" : "error"}`}
+            >
+              {"Enrutamiento:\n" +
+                JSON.stringify(resultadoArchivo.enrutamiento.body, null, 2)}
             </div>
           )}
         </div>
@@ -197,8 +300,14 @@ export default function Pagina() {
             ))}
           </select>
 
-          <button className="enviar" disabled={!texto.trim() || enviandoJson} onClick={enviarJson}>
-            {enviandoJson ? "Enviando y clasificando..." : "Enviar JSON"}
+          <button
+            className="enviar"
+            disabled={!texto.trim() || enviandoJson}
+            onClick={enviarJson}
+          >
+            {enviandoJson
+              ? "Enviando, clasificando y enrutando..."
+              : "Enviar JSON"}
           </button>
 
           {resultadoJson && (
@@ -207,8 +316,19 @@ export default function Pagina() {
             </div>
           )}
           {resultadoJson?.clasificacion && (
-            <div className={`resultado ${resultadoJson.clasificacion.ok ? "ok" : "error"}`}>
-              {"Clasificación:\n" + JSON.stringify(resultadoJson.clasificacion.body, null, 2)}
+            <div
+              className={`resultado ${resultadoJson.clasificacion.ok ? "ok" : "error"}`}
+            >
+              {"Clasificación:\n" +
+                JSON.stringify(resultadoJson.clasificacion.body, null, 2)}
+            </div>
+          )}
+          {resultadoJson?.enrutamiento && (
+            <div
+              className={`resultado ${resultadoJson.enrutamiento.ok ? "ok" : "error"}`}
+            >
+              {"Enrutamiento:\n" +
+                JSON.stringify(resultadoJson.enrutamiento.body, null, 2)}
             </div>
           )}
         </div>
