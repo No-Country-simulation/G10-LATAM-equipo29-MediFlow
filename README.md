@@ -178,7 +178,7 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 | POST   | `/api/ingest/file`     | `multipart/form-data`: `archivo` (File), `canal_origen` (opcional)                                                                                                                  |
 | POST   | `/api/ingest/json`     | `application/json`: `{ tipo_archivo, documento_texto, canal_origen? }`                                                                                                              |
 | GET    | `/api/ingest/salud`    | Healthcheck                                                                                                                                                                         |
-| POST   | `/api/ingest/classify` | `application/json`: `{ documento_id, ruta_objeto }` — clasifica el documento con Gemini                                                                                             |
+| POST   | `/api/ingest/classify` | `application/json`: `{ documento_id, ruta_objeto, calificacion_usuario? }` — clasifica y resume el documento con Gemini; puntuación 1-2 solicita reevaluación |
 | POST   | `/api/ingest/route`    | `application/json`: `{ documento_id, categoria, confianza, requiere_revision_humana, canal_origen?, destinos_no_disponibles? }` — aplica grafo de decisión, enrutamiento y fallback |
 
 ### Ejemplo de respuesta exitosa (`201`)
@@ -212,7 +212,8 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 
 `POST /api/ingest/classify` toma la salida de la ingesta (`documento_id` y
 `almacenamiento_oci.ruta_objeto`), lee el original desde OCI Object Storage,
-lo envía a Gemini (multimodal: PDF, imagen o texto/JSON) y devuelve la categoría.
+lo envía a Gemini (multimodal: PDF, imagen o texto/JSON) y devuelve la categoría,
+un resumen, una prioridad orientativa y si conviene revisión clínica humana.
 La pantalla de recepción lo invoca automáticamente después de cada ingesta exitosa.
 
 Configuración (solo servidor, nunca `NEXT_PUBLIC_`):
@@ -237,7 +238,10 @@ Ejemplo de respuesta (`200`):
   "categoria": "RECETA_MEDICA",
   "confianza": 0.93,
   "justificacion": "Contiene prescripción de medicamentos con dosis.",
-  "requiere_revision_humana": false,
+  "resumen_contenido": "El documento presenta una receta médica.",
+  "prioridad_urgencia": "BAJA",
+  "requiere_revision_clinica": false,
+  "requiere_revision_humana": true,
   "modelo": "gemini-3.5-flash-lite",
   "clasificado_en": "2026-10-05T21:30:00.000Z",
   "resultado_oci": {
@@ -249,8 +253,22 @@ Ejemplo de respuesta (`200`):
 
 - La salida de Gemini se fuerza a JSON con esquema y se vuelve a validar con
   Zod; una respuesta inválida devuelve `502` sin exponer su contenido.
-- `requiere_revision_humana` es `true` si `confianza < 0.7` o la categoría es
-  `OTRO` (casos ambiguos para el flujo con revisión humana).
+- `requiere_revision_humana` es `true` cuando la confianza supera `0.7`; en caso
+  contrario, el documento se considera `no clasificado` y requiere menos
+  intervención automática.
+- `resumen_contenido` y `prioridad_urgencia` (`BAJA`, `MEDIA`, `ALTA` o
+  `NO_DETERMINADA`) son sugerencias generadas a partir del documento.
+  `requiere_revision_clinica` es independiente de la confianza de clasificación:
+  se activa ante cáncer, padecimientos crónicos, señales graves o información
+  insuficiente. La interfaz prioriza revisión manual si cualquiera de las dos
+  señales (`requiere_revision_humana` o `requiere_revision_clinica`) lo indica.
+- La interfaz solicita una calificación del 1 al 5. Una calificación 1 o 2
+  reanaliza el mismo documento una vez con temperature `0.2` y guarda la
+  calificación junto al nuevo resultado. El ajuste busca una salida más
+  consistente, pero no garantiza que el modelo sea correcto.
+- La prioridad es orientativa y no es diagnóstico ni triaje médico. No sustituye
+  la valoración profesional ni debe usarse para decidir por sí sola la atención
+  de una emergencia.
 - `ruta_objeto` debe ser exactamente el original recibido de ese `documento_id`
   (`recibidos/AAAA/MM/<id>/<id>.<ext>`); cualquier otra ruta se rechaza con `422`
   antes de tocar OCI, para no leer objetos arbitrarios del bucket.
