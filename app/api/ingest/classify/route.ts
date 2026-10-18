@@ -91,7 +91,7 @@ export async function POST(request: Request) {
         { status: error.status },
       );
     }
-    console.error("Error inesperado en /api/classify:", error);
+    console.error("Error inesperado en /api/ingest/classify");
     return NextResponse.json(
       { status: "rechazado", detalle: "Error interno al clasificar el documento." },
       { status: 500 },

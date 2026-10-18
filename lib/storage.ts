@@ -95,14 +95,11 @@ export function obtenerConexionOci(): Conexion {
     };
 
     return conexion;
-  } catch (error) {
-    console.error("ERROR OCI REAL:", error);
-
+  } catch {
+    console.error("OCI: configuración de almacenamiento inválida o incompleta");
     throw new ErrorAlmacenamiento(
       503,
-      error instanceof Error
-        ? `OCI: ${error.message}`
-        : "El almacenamiento OCI no está configurado correctamente.",
+      "El almacenamiento OCI no está configurado correctamente.",
     );
   }
 }
@@ -349,11 +346,17 @@ async function leerFlujo(
     }
   } else {
     for await (const parte of flujo as AsyncIterable<Uint8Array | string>) {
-      acumular(typeof parte === "string" ? Buffer.from(parte) : parte);
+      acumular(typeof parte === "string" ? new TextEncoder().encode(parte) : parte);
     }
   }
 
-  return Buffer.concat(partes);
+  const contenido = new Uint8Array(total);
+  let offset = 0;
+  for (const parte of partes) {
+    contenido.set(parte, offset);
+    offset += parte.byteLength;
+  }
+  return contenido;
 }
 
 /**

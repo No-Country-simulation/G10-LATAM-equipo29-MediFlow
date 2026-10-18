@@ -111,7 +111,7 @@ export async function POST(request: Request) {
         { status: 413 },
       );
     }
-    console.error("Error inesperado en /api/ingest/json:", error);
+    console.error("Error inesperado en /api/ingest/json");
     return NextResponse.json(
       { status: "rechazado", detalle: "Error interno al procesar el documento." },
       { status: 500 },
