@@ -73,10 +73,8 @@ export interface ResultadoIngesta {
   tamano_bytes: number;
   canal_origen: CanalOrigen;
   recibido_en: string;
-  almacenamiento_oci: {
-    bucket: string;
-    ruta_objeto: string;
-  };
+  almacenamiento: "deshabilitado";
+  nombre_original: string;
 }
 
 /** Metadatos básicos de entrada persistidos junto al documento (<documento_id>.metadata.json)

@@ -5,86 +5,23 @@ import { useEffect, useRef, useState } from "react";
 
 import Etapas from "@/components/Etapas";
 import type { EstadoEscena } from "@/components/EscenaMedica";
-import VistaResultado, { veredictoDe } from "@/components/VistaResultado";
+import VistaResultado from "@/components/VistaResultado";
 import { CANALES, formatearTamano } from "@/components/etiquetas";
 import type { Fase, Resultado } from "@/components/tipos";
+import { recibirEventos, resultadoInterfaz } from "@/lib/cliente-flujo";
 
 // La escena 3D solo existe en el navegador y se carga aparte del resto.
 const EscenaMedica = dynamic(() => import("@/components/EscenaMedica"), {
   ssr: false,
 });
 
-/** Clasifica automáticamente un documento recién ingerido (usa la salida de la ingesta). */
-async function clasificar(ingesta: unknown): Promise<Resultado> {
-  const { documento_id, almacenamiento_oci } = ingesta as {
-    documento_id: string;
-    almacenamiento_oci: { ruta_objeto: string };
-  };
-  try {
-    const respuesta = await fetch("/api/ingest/classify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        documento_id,
-        ruta_objeto: almacenamiento_oci.ruta_objeto,
-      }),
-    });
-    return { ok: respuesta.ok, body: await respuesta.json() };
-  } catch (error) {
-    return { ok: false, body: { detalle: String(error) } };
-  }
-}
-
-/** Enruta automáticamente según categoría y reglas condicionales. */
-async function enrutar(
-  clasificacion: unknown,
-  ingesta: unknown,
-): Promise<Resultado> {
-  const datosClasificacion = clasificacion as {
-    documento_id?: string;
-    categoria?: string;
-    confianza?: number;
-    requiere_revision_humana?: boolean;
-  };
-  const datosIngesta = ingesta as { canal_origen?: string };
-
-  if (
-    !datosClasificacion.documento_id ||
-    !datosClasificacion.categoria ||
-    typeof datosClasificacion.confianza !== "number" ||
-    typeof datosClasificacion.requiere_revision_humana !== "boolean"
-  ) {
-    return {
-      ok: false,
-      body: {
-        detalle: "No se pudo enrutar: faltan datos de clasificación válidos.",
-      },
-    };
-  }
-
-  try {
-    const respuesta = await fetch("/api/ingest/route", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        documento_id: datosClasificacion.documento_id,
-        categoria: datosClasificacion.categoria,
-        confianza: datosClasificacion.confianza,
-        requiere_revision_humana: datosClasificacion.requiere_revision_humana,
-        canal_origen: datosIngesta.canal_origen,
-      }),
-    });
-    return { ok: respuesta.ok, body: await respuesta.json() };
-  } catch (error) {
-    return { ok: false, body: { detalle: String(error) } };
-  }
-}
-
 const TEXTO_BOTON: Record<Fase, string | null> = {
   reposo: null,
   ingesta: "Recibiendo el documento...",
-  clasificacion: "Clasificando...",
-  enrutamiento: "Eligiendo la cola de destino...",
+  clasificacion: "Clasificando el documento...",
+  extraccion: "Extrayendo y evaluando datos clínicos...",
+  enrutamiento: "Asignando la cola según el tipo de documento...",
+  almacenamiento: "Guardando el resultado en OCI...",
   listo: null,
   error: null,
 };
@@ -117,80 +54,38 @@ export default function Pagina() {
 
   const panelResultado = useRef<HTMLDivElement>(null);
   const enviando =
-    fase === "ingesta" || fase === "clasificacion" || fase === "enrutamiento";
+    fase === "ingesta" || fase === "clasificacion" || fase === "extraccion" || fase === "enrutamiento" || fase === "almacenamiento";
 
-  /** Corre el flujo completo: ingesta → clasificación → enrutamiento. */
-  async function ejecutarFlujo(ingestar: () => Promise<Response>) {
+  /** El servidor coordina las etapas y confirma la escritura terminal en OCI. */
+  async function ejecutarFlujo(contenido: FormData | string) {
     setResultado(null);
     setFase("ingesta");
-
     try {
-      const respuesta = await ingestar();
-      const ingesta: Resultado = {
-        ok: respuesta.ok,
-        body: await respuesta.json(),
-      };
-
-      if (!ingesta.ok) {
-        setResultado(ingesta);
-        setFase("error");
-        return;
-      }
-
-      setResultado(ingesta);
-      setFase("clasificacion");
-      const resultadoClasificacion = await clasificar(ingesta.body);
-
-      if (!resultadoClasificacion.ok) {
-        setResultado({ ...ingesta, clasificacion: resultadoClasificacion });
-        setFase("error");
-        return;
-      }
-
-      setResultado({ ...ingesta, clasificacion: resultadoClasificacion });
-      setFase("enrutamiento");
-      const resultadoEnrutamiento = await enrutar(
-        resultadoClasificacion.body,
-        ingesta.body,
-      );
-
-      setResultado({
-        ...ingesta,
-        clasificacion: resultadoClasificacion,
-        enrutamiento: resultadoEnrutamiento,
+      const response = await fetch("/api/process", { method: "POST", body: contenido,
+        ...(typeof contenido === "string" ? { headers: { "Content-Type": "application/json" } } : {}) });
+      await recibirEventos(response, evento => {
+        setResultado(resultadoInterfaz(evento.resultado));
+        setFase(evento.fase);
       });
-      setFase(resultadoEnrutamiento.ok ? "listo" : "error");
     } catch (error) {
-      setResultado({ ok: false, body: { detalle: String(error) } });
+      setResultado(anterior => ({ ...(anterior ?? { body: {} }), ok: false,
+        body: { ...(anterior?.body as object ?? {}), detalle: error instanceof Error ? error.message : "No se pudo completar el procesamiento." } }));
       setFase("error");
     }
   }
-
   function enviarArchivo() {
     if (!archivo || enviando) return;
     const formData = new FormData();
     formData.append("archivo", archivo);
     formData.append("canal_origen", canalArchivo);
-    void ejecutarFlujo(() =>
-      fetch("/api/ingest/file", { method: "POST", body: formData }),
-    );
+    void ejecutarFlujo(formData);
   }
 
   function enviarJson() {
     if (!texto.trim() || enviando) return;
-    void ejecutarFlujo(() =>
-      fetch("/api/ingest/json", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tipo_archivo: tipoJson,
-          documento_texto: texto,
-          canal_origen: canalJson,
-        }),
-      }),
-    );
+    const contenido = JSON.stringify({ tipo_archivo: tipoJson, documento_texto: texto, canal_origen: canalJson });
+    void ejecutarFlujo(contenido);
   }
-
   // Al terminar, lleva la vista al resultado (útil cuando está debajo del formulario).
   useEffect(() => {
     if (fase !== "listo" && fase !== "error") return;
@@ -201,15 +96,12 @@ export default function Pagina() {
     });
   }, [fase]);
 
-  const veredicto = veredictoDe(resultado);
   const estadoEscena: EstadoEscena = enviando
     ? "procesando"
     : fase === "error"
       ? "error"
       : fase === "listo"
-        ? veredicto === "revision"
-          ? "revision"
-          : "ok"
+        ? "ok"
         : "reposo";
 
   return (
@@ -225,11 +117,10 @@ export default function Pagina() {
         <div className="portada__contenido">
           <div className="portada__texto">
             <h1 className="portada__titulo">
-              Cada documento clínico, en la cola correcta.
+              La información clínica, en un solo lugar.
             </h1>
             <p className="portada__bajada">
-              Reciba PDF, imágenes o texto, clasifíquelos con IA y envíelos al
-              área que corresponde. Los casos dudosos pasan a revisión humana.
+              Reciba PDF, imágenes o texto y extraiga sus datos clínicos con IA para consultarlos en una estructura JSON.
             </p>
             <a className="boton boton--claro" href="#recepcion">
               Subir un documento
@@ -433,8 +324,7 @@ export default function Pagina() {
               <VistaResultado resultado={resultado} />
             ) : (
               <p className="vacio">
-                Cuando envíe un documento, aquí verá su categoría, el nivel de
-                confianza y la cola a la que fue enviado.
+                Cuando envíe un documento, aquí verá su recepción y los datos clínicos extraídos.
               </p>
             )}
           </aside>
@@ -447,3 +337,4 @@ export default function Pagina() {
     </>
   );
 }
+

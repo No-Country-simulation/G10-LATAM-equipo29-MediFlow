@@ -418,7 +418,7 @@ export async function leerDocumentoRecibido(
 export async function persistirResultadoProcesado(
   documentoId: string,
   ruta: RutaRecibido,
-  sufijo: "clasificacion",
+  sufijo: "clasificacion" | "extraccion",
   resultado: unknown,
   obtenerConexion: () => Conexion<Pick<ObjectStorageClient, "putObject">> =
     obtenerConexionOci,
@@ -450,4 +450,32 @@ export async function persistirResultadoProcesado(
   }
 
   return { bucket: BUCKET_DOCUMENTOS, ruta_objeto: rutaObjeto };
+}
+
+/** Lee una etapa del mismo documento, con ruta derivada y límite de memoria. */
+export async function leerResultadoProcesado(
+  documentoId: string,
+  rutaObjetoOriginal: string,
+  sufijo: "clasificacion" | "extraccion",
+  obtenerConexion: () => Conexion<ClienteLectura> = obtenerConexionOci,
+): Promise<unknown> {
+  const ruta = analizarRutaRecibido(documentoId, rutaObjetoOriginal);
+  const { cliente, namespace } = obtenerConexion();
+  const limite = 1024 * 1024;
+  try {
+    const respuesta = await cliente.getObject({
+      namespaceName: namespace, bucketName: BUCKET_DOCUMENTOS,
+      objectName: `procesados/${ruta.anio}/${ruta.mes}/${documentoId}/${documentoId}.${sufijo}.json`,
+      retryConfiguration: NoRetryConfigurationDetails,
+    });
+    if (respuesta.contentLength > limite) throw new ErrorAlmacenamiento(502, "Resultado almacenado demasiado grande.");
+    const bytes = await leerFlujo(respuesta.value, limite);
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch (error) {
+    if (error instanceof ErrorAlmacenamiento) throw error;
+    if ((error as { statusCode?: number })?.statusCode === 404) {
+      throw new ErrorAlmacenamiento(409, "Debe completar la etapa previa del documento antes de continuar.");
+    }
+    throw new ErrorAlmacenamiento(502, "No se pudo leer un resultado válido desde OCI.");
+  }
 }

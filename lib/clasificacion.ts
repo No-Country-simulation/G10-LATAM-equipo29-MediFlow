@@ -46,9 +46,6 @@ const DESCRIPCION_CATEGORIAS: Record<CategoriaDocumento, string> = {
     "no encaja en ninguna categoría anterior, está ilegible o no es un documento clínico.",
 };
 
-/** Por debajo de este valor el documento se marca para revisión humana. */
-export const UMBRAL_CONFIANZA = 0.7;
-
 export const MODELO_GEMINI_POR_DEFECTO = "gemini-3.5-flash-lite";
 
 /** El límite de la solicitud inline de Gemini es 20 MB en total, y base64
@@ -157,8 +154,6 @@ export interface ClasificacionModelo {
   categoria: CategoriaDocumento;
   confianza: number;
   justificacion: string;
-  requiere_revision_humana: boolean;
-  modelo: string;
 }
 
 function construirPartes(entrada: EntradaClasificacion) {
@@ -256,11 +251,5 @@ export async function clasificarDocumento(
     );
   }
 
-  return {
-    ...interpretada,
-    requiere_revision_humana:
-      interpretada.confianza < UMBRAL_CONFIANZA ||
-      interpretada.categoria === "OTRO",
-    modelo,
-  };
+  return interpretada;
 }

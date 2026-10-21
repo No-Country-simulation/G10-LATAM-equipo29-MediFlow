@@ -1,16 +1,35 @@
-import type { Fase, Resultado } from "./tipos";
+import { leer, type Fase, type Resultado } from "./tipos";
 
 type EstadoEtapa = "espera" | "activa" | "lista" | "error";
 
 const ETAPAS: Array<{ clave: Exclude<Fase, "reposo" | "listo" | "error">; titulo: string; detalle: string }> = [
   { clave: "ingesta", titulo: "Ingesta", detalle: "Recibe el documento y valida su formato" },
-  { clave: "clasificacion", titulo: "Clasificación", detalle: "La IA identifica qué tipo de documento es" },
-  { clave: "enrutamiento", titulo: "Enrutamiento", detalle: "Elige la cola que debe atenderlo" },
+  { clave: "clasificacion", titulo: "Clasificación", detalle: "Identifica el tipo de documento con Gemini" },
+  { clave: "extraccion", titulo: "Extracción y decisión", detalle: "Valida, evalúa confianza y determina prioridad y destino" },
+  { clave: "enrutamiento", titulo: "Enrutamiento", detalle: "Asigna la cola según el tipo de documento" },
+  { clave: "almacenamiento", titulo: "Almacenamiento OCI", detalle: "Guarda el JSON final según la ruta del flujo" },
 ];
 
+function tieneRutaNormal(resultado: Resultado | null): boolean {
+  const datos = leer<{ prioridad_urgencia: { estado: string; nivel: string } }>(resultado?.extraccion?.body);
+  return datos.prioridad_urgencia?.estado === "evaluada" && datos.prioridad_urgencia.nivel === "NORMAL";
+}
+
 function estadoDe(clave: (typeof ETAPAS)[number]["clave"], fase: Fase, resultado: Resultado | null): EstadoEtapa {
+  if (clave === "almacenamiento") {
+    if (fase === clave) return "activa";
+    if (resultado?.almacenamiento_oci) return resultado.almacenamiento_oci.status_backup === "exito" ? "lista" : "error";
+    return "espera";
+  }
+  if (clave === "enrutamiento") {
+    if (fase === "enrutamiento") return "activa";
+    const datos = leer<{ status: string }>(resultado?.enrutamiento?.body);
+    if (datos.status === "enrutado") return "lista";
+    return fase === "error" && tieneRutaNormal(resultado) ? "error" : "espera";
+  }
+  if (clave === "extraccion" && tieneRutaNormal(resultado)) return "lista";
   const etapa =
-    clave === "ingesta" ? resultado : clave === "clasificacion" ? resultado?.clasificacion : resultado?.enrutamiento;
+    clave === "ingesta" ? resultado : resultado?.[clave];
   if (fase === clave) return "activa";
   if (etapa) return etapa.ok ? "lista" : "error";
   return "espera";
@@ -42,13 +61,14 @@ function Marca({ estado, numero }: { estado: EstadoEtapa; numero: number }) {
 }
 
 export default function Etapas({ fase, resultado }: { fase: Fase; resultado: Resultado | null }) {
+  const etapas = ETAPAS.filter(etapa => etapa.clave !== "enrutamiento" || fase === "enrutamiento" || tieneRutaNormal(resultado));
   return (
     <ol className="etapas" aria-label="Avance del documento">
-      {ETAPAS.map((etapa, i) => {
+      {etapas.map((etapa, i) => {
         const estado = estadoDe(etapa.clave, fase, resultado);
         return (
           <li key={etapa.clave} className={`etapa etapa--${estado}`}>
-            {i < ETAPAS.length - 1 && (
+            {i < etapas.length - 1 && (
               <span className={`etapa__union ${estado === "lista" ? "etapa__union--llena" : ""}`} aria-hidden="true" />
             )}
             <span className="etapa__marca">

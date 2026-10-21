@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import type { GenerateContentParameters } from "@google/genai";
@@ -54,8 +53,6 @@ test("clasifica un PDF enviándolo inline a Gemini con salida estructurada", asy
     categoria: "RECETA_MEDICA",
     confianza: 0.93,
     justificacion: "Contiene prescripción de medicamentos con dosis.",
-    requiere_revision_humana: false,
-    modelo: "modelo-prueba",
   });
 
   assert.equal(gemini.llamadas.length, 1);
@@ -83,15 +80,16 @@ test("usa el MIME correcto para cada imagen admitida", async () => {
   }
 });
 
-test("marca revisión humana con confianza baja o categoría OTRO", async () => {
-  for (const [extra, esperado] of [
-    [{ confianza: 0.69 }, true],
-    [{ confianza: 0.7 }, false],
-    [{ categoria: "OTRO", confianza: 0.99 }, true],
+test("clasificación omite modelo y decisiones de revisión incluso con confianza baja u OTRO", async () => {
+  for (const extra of [
+    { confianza: 0.69 },
+    { confianza: 0.7 },
+    { categoria: "OTRO", confianza: 0.99 },
   ] as const) {
     const gemini = simularGemini(respuestaModelo(extra));
     const resultado = await clasificarDocumento({ contenido: pdf, extension: "pdf" }, gemini.conectar);
-    assert.equal(resultado.requiere_revision_humana, esperado);
+    assert.equal("requiere_revision_humana" in resultado, false);
+    assert.equal("modelo" in resultado, false);
   }
 });
 
@@ -249,122 +247,50 @@ test("guarda el resultado en procesados/ junto al mismo AAAA/MM, permitiendo rec
   assert.deepEqual(JSON.parse(Buffer.from(puts[0].putObjectBody as Buffer).toString()), { categoria: "OTRO" });
 });
 
-test("POST /api/classify: lee de OCI, llama a Gemini y guarda el resultado", async (t) => {
-  const variables = ["OCI_REGION", "OCI_NAMESPACE", "OCI_AUTH_MODE", "OCI_TENANCY_OCID",
-    "OCI_USER_OCID", "OCI_FINGERPRINT", "OCI_PRIVATE_KEY", "OCI_PRIVATE_KEY_PASSPHRASE",
-    "GEMINI_API_KEY", "GEMINI_MODEL"];
-  const anteriores = variables.map((nombre) => process.env[nombre]);
-  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
+test("clasificación recibe el documento directamente sin OCI", async (t) => {
+  const variables = ["OCI_NAMESPACE", "GEMINI_API_KEY", "GEMINI_MODEL"];
+  const anteriores = variables.map(v => process.env[v]);
+  delete process.env.OCI_NAMESPACE;
+  Object.assign(process.env, { GEMINI_API_KEY: "prueba", GEMINI_MODEL: "modelo-prueba" });
+  const get = t.mock.method(ObjectStorageClient.prototype, "getObject", async () => { throw new Error("No leer OCI"); });
+  const put = t.mock.method(ObjectStorageClient.prototype, "putObject", async () => { throw new Error("No escribir OCI"); });
+  let invalido = false;
+  const solicitudes: string[] = [];
+  t.mock.method(globalThis, "fetch", async (url: unknown, init?: RequestInit) => {
+    assert.match(String(url), /generativelanguage.googleapis.com/);
+    solicitudes.push(String(init?.body));
+    return Response.json({ candidates: [{ content: { role: "model", parts: [{ text: invalido ? "{}" : respuestaModelo() }] }, finishReason: "STOP" }] });
   });
-  Object.assign(process.env, {
-    OCI_REGION: "us-phoenix-1", OCI_NAMESPACE: "namespace-prueba", OCI_AUTH_MODE: "api_key",
-    OCI_TENANCY_OCID: "ocid1.tenancy.oc1..prueba", OCI_USER_OCID: "ocid1.user.oc1..prueba",
-    OCI_FINGERPRINT: "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00",
-    OCI_PRIVATE_KEY: privateKey, OCI_PRIVATE_KEY_PASSPHRASE: "",
-    GEMINI_API_KEY: "clave-de-prueba", GEMINI_MODEL: "modelo-de-prueba",
-  });
-
-  const lecturas: requests.GetObjectRequest[] = [];
-  const puts: requests.PutObjectRequest[] = [];
-  let existe = true;
-  t.mock.method(ObjectStorageClient.prototype, "getObject", async (request: requests.GetObjectRequest) => {
-    lecturas.push(request);
-    if (!existe) throw Object.assign(new Error("no existe"), { statusCode: 404 });
-    return { contentLength: pdf.byteLength, value: Readable.from([pdf]) };
-  });
-  t.mock.method(ObjectStorageClient.prototype, "putObject", async (request: requests.PutObjectRequest) => {
-    puts.push(request);
-    return { eTag: "etag-prueba" };
-  });
-
-  const peticionesGemini: { url: string; clave: string | null; cuerpo: any }[] = [];
-  const fetchOriginal = globalThis.fetch;
-  t.mock.method(globalThis, "fetch", async (entrada: unknown, init?: RequestInit) => {
-    const url = String(entrada instanceof Request ? entrada.url : entrada);
-    assert.match(url, /generativelanguage\.googleapis\.com/, "solo se permite tráfico hacia Gemini");
-    peticionesGemini.push({
-      url,
-      clave: new Headers(init?.headers).get("x-goog-api-key"),
-      cuerpo: JSON.parse(String(init?.body)),
-    });
-    return Response.json({
-      candidates: [{
-        content: { role: "model", parts: [{ text: respuestaModelo() }] },
-        finishReason: "STOP",
-      }],
-    });
-  });
-
-  const solicitar = (body: unknown) => clasificar(new Request("http://localhost/api/classify", {
-    method: "POST", body: typeof body === "string" ? body : JSON.stringify(body),
+  const json = (body: unknown) => clasificar(new Request("http://localhost/api/ingest/classify", {
+    method: "POST", body: typeof body === "string" ? body : JSON.stringify(body), headers: { "Content-Type": "application/json" },
   }));
-
   try {
-    const ok = await solicitar({ documento_id: id, ruta_objeto: rutaPdf });
-    assert.equal(ok.status, 200);
-    const cuerpo = await ok.json();
-    assert.equal(cuerpo.status, "clasificado");
-    assert.equal(cuerpo.documento_id, id);
-    assert.equal(cuerpo.categoria, "RECETA_MEDICA");
-    assert.equal(cuerpo.confianza, 0.93);
-    assert.equal(cuerpo.requiere_revision_humana, false);
-    assert.equal(cuerpo.modelo, "modelo-de-prueba");
-    assert.ok(!Number.isNaN(Date.parse(cuerpo.clasificado_en)));
-    assert.deepEqual(cuerpo.resultado_oci, {
-      bucket: "mediflow-documentos-clinicos",
-      ruta_objeto: `procesados/2026/09/${id}/${id}.clasificacion.json`,
-    });
-
-    assert.equal(lecturas.length, 1);
-    assert.equal(lecturas[0].objectName, rutaPdf);
-
-    assert.equal(peticionesGemini.length, 1);
-    assert.match(peticionesGemini[0].url, /modelo-de-prueba:generateContent/);
-    assert.equal(peticionesGemini[0].clave, "clave-de-prueba");
-    const partes = peticionesGemini[0].cuerpo.contents[0].parts;
-    const inline = partes.find((p: any) => p.inlineData ?? p.inline_data);
-    assert.ok(inline, "el PDF viaja como dato inline");
-    assert.deepEqual(Buffer.from((inline.inlineData ?? inline.inline_data).data, "base64"), pdf);
-
-    assert.equal(puts.length, 1);
-    assert.equal(puts[0].objectName, cuerpo.resultado_oci.ruta_objeto);
-    const guardado = JSON.parse(Buffer.from(puts[0].putObjectBody as Buffer).toString());
-    assert.equal(guardado.categoria, "RECETA_MEDICA");
-    assert.equal(guardado.documento_id, id);
-    assert.equal("status" in guardado, false);
-    assert.equal("resultado_oci" in guardado, false);
-
-    // Entradas inválidas: no tocan OCI ni Gemini.
-    const antes = { lecturas: lecturas.length, gemini: peticionesGemini.length, puts: puts.length };
-    for (const [body, estado] of [
-      ["{", 400],
-      [{}, 422],
-      [{ documento_id: "../x", ruta_objeto: rutaPdf }, 422],
-      [{ documento_id: id, ruta_objeto: `recibidos/2026/09/${id}/${id}.metadata.json` }, 422],
-      [{ documento_id: id, ruta_objeto: `recibidos/2026/09/DOC-CLIN-2026-AAAAAA/DOC-CLIN-2026-AAAAAA.pdf` }, 422],
-    ] as const) {
-      const respuesta = await solicitar(body);
-      assert.equal(respuesta.status, estado);
-      assert.equal((await respuesta.json()).status, "rechazado");
+    for (const [nombre, bytes, mime] of [["prueba.pdf", pdf, "application/pdf"],
+      ["prueba.jpg", Buffer.from([0xff, 0xd8, 0xff]), "image/jpeg"],
+      ["prueba.json", Buffer.from('{"dato":1}'), "application/json"]] as const) {
+      const form = new FormData(); form.set("documento_id", id);
+      form.set("archivo", new File([bytes], nombre, { type: mime }));
+      const r = await clasificar(new Request("http://localhost/api/ingest/classify", { method: "POST", body: form }));
+      assert.equal(r.status, 200);
+      const salida = await r.json();
+      assert.equal(salida.documento_id, id);
+      assert.equal(salida.categoria, "RECETA_MEDICA");
+      assert.equal(salida.confianza, 0.93);
+      assert.equal("resultado_oci" in salida, false);
+      if (mime !== "application/json") assert.ok(solicitudes.at(-1)?.includes(bytes.toString("base64")));
     }
-    assert.deepEqual(
-      { lecturas: lecturas.length, gemini: peticionesGemini.length, puts: puts.length },
-      antes,
-    );
-
-    // Documento inexistente: 404 sin llamar a Gemini ni escribir.
-    existe = false;
-    const noExiste = await solicitar({ documento_id: id, ruta_objeto: rutaPdf });
-    assert.equal(noExiste.status, 404);
-    assert.equal(peticionesGemini.length, 1);
-    assert.equal(puts.length, 1);
+    for (const [tipo_archivo, documento_texto] of [["TEXTO", "Receta sintética"], ["JSON", '{"dato":1}']]) {
+      assert.equal((await json({ documento_id: id, tipo_archivo, documento_texto })).status, 200);
+    }
+    const antes = solicitudes.length;
+    assert.equal((await json({ documento_id: id, ruta_objeto: rutaPdf })).status, 422);
+    assert.equal((await json("{")).status, 400);
+    assert.equal(solicitudes.length, antes);
+    invalido = true;
+    assert.equal((await json({ documento_id: id, tipo_archivo: "TEXTO", documento_texto: "Prueba" })).status, 502);
+    assert.equal(get.mock.callCount(), 0);
+    assert.equal(put.mock.callCount(), 0);
   } finally {
-    globalThis.fetch = fetchOriginal;
-    variables.forEach((nombre, indice) => {
-      if (anteriores[indice] === undefined) delete process.env[nombre];
-      else process.env[nombre] = anteriores[indice];
-    });
+    variables.forEach((v, i) => { if (anteriores[i] === undefined) delete process.env[v]; else process.env[v] = anteriores[i]; });
   }
 });
