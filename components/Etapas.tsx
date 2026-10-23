@@ -1,6 +1,6 @@
 import { leer, type Fase, type Resultado } from "./tipos";
 
-type EstadoEtapa = "espera" | "activa" | "lista" | "error";
+type EstadoEtapa = "espera" | "activa" | "lista" | "error" | "omitida";
 
 const ETAPAS: Array<{ clave: Exclude<Fase, "reposo" | "listo" | "error">; titulo: string; detalle: string }> = [
   { clave: "ingesta", titulo: "Ingesta", detalle: "Recibe el documento y valida su formato" },
@@ -16,6 +16,7 @@ function tieneRutaNormal(resultado: Resultado | null): boolean {
 }
 
 function estadoDe(clave: (typeof ETAPAS)[number]["clave"], fase: Fase, resultado: Resultado | null): EstadoEtapa {
+  if (clave === "extraccion" && resultado?.json_final?.decision_enrutamiento?.requiere_auditoria_humana) return "omitida";
   if (clave === "almacenamiento") {
     if (fase === clave) return "activa";
     if (resultado?.almacenamiento_oci) return resultado.almacenamiento_oci.status_backup === "exito" ? "lista" : "error";
@@ -40,6 +41,7 @@ const TEXTO_ESTADO: Record<EstadoEtapa, string> = {
   activa: "en curso",
   lista: "completada",
   error: "con error",
+  omitida: "omitida por revisión de clasificación",
 };
 
 function Marca({ estado, numero }: { estado: EstadoEtapa; numero: number }) {
@@ -76,7 +78,7 @@ export default function Etapas({ fase, resultado }: { fase: Fase; resultado: Res
             </span>
             <span className="etapa__texto">
               <strong>{etapa.titulo}</strong>
-              <span>{etapa.detalle}</span>
+              <span>{estado === "omitida" ? TEXTO_ESTADO.omitida : etapa.detalle}</span>
               <span className="solo-lector">, {TEXTO_ESTADO[estado]}</span>
             </span>
           </li>

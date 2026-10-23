@@ -6,7 +6,9 @@ Cubre el requisito del MVP del hackathon:
 
 Recepción y **validación estricta** de documentos clínicos antes de que
 entren al grafo de decisión (clasificación → extracción → enrutamiento).
-Formatos aceptados: **PDF, IMAGEN (jpg/png/tiff/webp) y JSON/TEXTO**.
+Formatos aceptados: **PDF, IMAGEN (jpg/png/webp) y JSON/TEXTO**.
+PDF e imágenes admiten hasta **14 MiB (14 680 064 bytes)**, tanto en recepción como
+en procesamiento. TIFF se rechaza en recepción, antes de guardar el original en OCI.
 Cualquier otro formato se rechaza con `415`, incluso si el nombre del
 archivo o el `Content-Type` intentan simular uno soportado (ver
 `lib/validators.ts`).
@@ -94,7 +96,7 @@ mediflow-documentos-clinicos/
 
 Año y mes se toman de la fecha de recepción en UTC, no del identificador.
 El archivo binario conserva exactamente sus bytes; extensión y MIME se derivan
-de su firma validada (JPEG se normaliza a `.jpg` y TIFF a `.tiff`). El nombre
+de su firma validada (JPEG se normaliza a `.jpg`). El nombre
 original se guarda únicamente en los metadatos. Para JSON/texto se conserva
 el cuerpo JSON original de la petición, sin reformatearlo, como `<id>.json`.
 El ID generado para una petición JSON sin identificador queda en los metadatos
@@ -106,6 +108,21 @@ y en la respuesta; no se modifica el original para insertarlo.
 y `ruta_objeto`. No incluye `content_type` ni `sha256`.
 
 ### Almacenamiento activo por resultado del flujo
+
+En `/api/process`, después de clasificar y antes de extraer, se aplica la política
+de ambigüedad. Una categoría específica con confianza mayor o igual al umbral
+continúa. Una confianza inferior o categoría `OTRO` deriva a `auditoria_humana/`.
+El umbral inicial es 0.85, configurable mediante `UMBRAL_CLASIFICACION` (0 a 1);
+es independiente del score de confianza de extracción y requiere calibración con
+documentos revisados. Una configuración inválida o fallo del modelo es un error técnico.
+
+`clasificacion.evaluacion` registra `umbral`, `estado` y `motivos`. En una salida
+ambigua, los bloques raíz `decision_enrutamiento` y `prioridad_urgencia` registran
+la auditoría pendiente de entrega y prioridad `no_evaluada`, con `urgente: null`.
+No se ejecutan ni se inventan extracción, validación, confianza o enrutamiento normal.
+La revisión humana debe considerar la posible urgencia que aún no fue evaluada.
+Los endpoints de etapas individuales siguen siendo herramientas independientes;
+la política de interrupción pertenece al flujo completo `/api/process`.
 
 La interfaz envía una sola solicitud a `POST /api/process`. El servidor coordina
 recepción, clasificación, extracción, validación, confianza, prioridad, enrutamiento

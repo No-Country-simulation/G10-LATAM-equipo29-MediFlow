@@ -17,7 +17,7 @@ export function veredictoDe(resultado: Resultado | null): Veredicto | null {
   if (!resultado) return null;
   if (!resultado.ok || resultado.clasificacion?.ok === false || resultado.extraccion?.ok === false || resultado.enrutamiento?.ok === false ||
     (resultado.almacenamiento_oci && resultado.almacenamiento_oci.status_backup !== "exito")) return "error";
-  return resultado.extraccion?.ok ? "ok" : null;
+  return resultado.extraccion?.ok || resultado.json_final?.decision_enrutamiento?.requiere_auditoria_humana ? "ok" : null;
 }
 
 export default function VistaResultado({ resultado }: { resultado: Resultado }) {
@@ -30,7 +30,8 @@ export default function VistaResultado({ resultado }: { resultado: Resultado }) 
   const validacion = leer<{ validacion: ResultadoValidacion }>(resultado.extraccion?.body).validacion;
   const confianza = leer<{ confianza_documento: ResultadoConfianza }>(resultado.extraccion?.body).confianza_documento;
   const decision = leer<DecisionDocumento>(resultado.extraccion?.body);
-  const titulo = veredicto === "ok" ? (decision.decision_enrutamiento?.requiere_auditoria_humana
+  const revisionClasificacion = resultado.json_final?.decision_enrutamiento;
+  const titulo = veredicto === "ok" ? (revisionClasificacion?.requiere_auditoria_humana || decision.decision_enrutamiento?.requiere_auditoria_humana
     ? "Revisión humana requerida" : "Extracción completada") : veredicto === "error"
     ? "No se pudo completar el proceso" : resultado.clasificacion?.ok
       ? "Documento clasificado · Extrayendo datos" : "Documento recibido · Clasificando";
@@ -59,6 +60,12 @@ export default function VistaResultado({ resultado }: { resultado: Resultado }) 
         {c.justificacion && <p>{c.justificacion}</p>}
       </section>}
       {resultado.extraccion?.ok && <ExtraccionClinica datos={leer<ExtraccionVisible>(resultado.extraccion.body)} />}
+      {revisionClasificacion && <section aria-label="Revisión de clasificación">
+        <h4>Clasificación ambigua · Revisión humana requerida</h4>
+        <p>{revisionClasificacion.justificacion_enrutamiento}</p>
+        <p>Destino: Cola de Auditoría Humana · Pendiente de entrega.</p>
+        <p>Prioridad no evaluada. Se omitieron extracción, validación, confianza de datos y asignación de área.</p>
+      </section>}
       {validacion && <ValidacionEstructural resultado={validacion} />}
       {confianza && <ConfianzaDocumento resultado={confianza} />}
       {decision.decision_enrutamiento && <section aria-label="Decisión de enrutamiento">

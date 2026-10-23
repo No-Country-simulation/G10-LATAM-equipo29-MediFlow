@@ -6,6 +6,7 @@ import { EnrutarEntradaSchema, enrutarDocumento } from "./enrutamiento";
 import { generarDocumentoId, DOC_ID_PATTERN } from "./types";
 import { guardarResultadoFinal } from "./almacenamiento-final";
 import type { JsonFlujo, RutaFinal } from "./resultado-flujo";
+import { evaluarClasificacion, revisionPorClasificacion } from "./politica-clasificacion";
 
 export type FaseServidor = "ingesta" | "clasificacion" | "extraccion" | "enrutamiento" | "almacenamiento";
 export type EventoFlujo = { fase: FaseServidor; resultado: JsonFlujo } |
@@ -58,6 +59,13 @@ export async function procesarFlujo(request: Request, publicar: (evento: EventoF
     const clasificacion = await deps.clasificar(documento);
     resultado.clasificacion = await clasificacion.json();
     if (!clasificacion.ok) { ruta = fallo(clasificacion.status); return await terminar(); }
+    const evaluacion = evaluarClasificacion(resultado.clasificacion!);
+    resultado.clasificacion!.evaluacion = evaluacion;
+    if (evaluacion.estado === "ambigua") {
+      Object.assign(resultado, revisionPorClasificacion());
+      ruta = "auditoria_humana";
+      return await terminar();
+    }
     emitir("extraccion");
     const extraccion = await deps.extraer(documento);
     resultado.extraccion = await extraccion.json();

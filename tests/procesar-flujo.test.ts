@@ -66,7 +66,7 @@ test("recepción guarda bytes intactos y metadatos una sola vez para archivo y t
 });
 
 test("el servidor finaliza cada rama una vez y conserva las etapas previas", async () => {
-  for (const caso of ["normal", "urgente", "auditoria_schema", "auditoria_confianza", "rechazo", "error_lectura", "error_clasificacion", "error_extraccion", "error_ruta"] as const) {
+  for (const caso of ["normal", "urgente", "auditoria_clasificacion", "auditoria_otro", "auditoria_schema", "auditoria_confianza", "rechazo", "error_lectura", "error_clasificacion", "error_extraccion", "error_ruta"] as const) {
     const eventos: EventoFlujo[] = [];
     const oci = ociSimulado();
     let clasificaciones = 0, extracciones = 0, rutas = 0, guardados = 0, lecturas = 0;
@@ -85,7 +85,8 @@ test("el servidor finaliza cada rama una vez y conserva las etapas previas", asy
         clasificaciones++;
         assert.equal(documento.documento_id, id);
         assert.equal(documento.contenido, bytesOci);
-        return Response.json({ status: caso === "error_clasificacion" ? "rechazado" : "clasificado", categoria: "RECETA_MEDICA" }, { status: caso === "error_clasificacion" ? 502 : 200 });
+        return Response.json({ status: caso === "error_clasificacion" ? "rechazado" : "clasificado", categoria: caso === "auditoria_otro" ? "OTRO" : "RECETA_MEDICA",
+          confianza: caso === "auditoria_clasificacion" ? 0.84 : 0.85 }, { status: caso === "error_clasificacion" ? 502 : 200 });
       },
       extraer: async documento => {
         extracciones++;
@@ -112,7 +113,17 @@ test("el servidor finaliza cada rama una vez y conserva las etapas previas", asy
     assert.equal(rutas, caso === "normal" || caso === "error_ruta" ? 1 : 0);
     assert.equal(lecturas, caso === "rechazo" ? 0 : 1);
     assert.equal(clasificaciones, caso === "rechazo" || caso === "error_lectura" ? 0 : 1);
-    assert.equal(extracciones, caso === "rechazo" || caso === "error_lectura" || caso === "error_clasificacion" ? 0 : 1);
+    const ambigua = caso === "auditoria_clasificacion" || caso === "auditoria_otro";
+    assert.equal(extracciones, caso === "rechazo" || caso === "error_lectura" || caso === "error_clasificacion" || ambigua ? 0 : 1);
+    if (ambigua) {
+      assert.equal(resultado.extraccion, undefined);
+      assert.equal(resultado.enrutamiento, undefined);
+      assert.equal(resultado.decision_enrutamiento?.destino_principal, "Cola_Auditoria_Humana");
+      assert.equal(resultado.prioridad_urgencia?.estado, "no_evaluada");
+      assert.equal(resultado.prioridad_urgencia?.urgente, null);
+      assert.ok(!eventos.some(e => e.fase === "extraccion" || e.fase === "enrutamiento"));
+      assert.deepEqual(JSON.parse(Buffer.from(oci.puts[0].putObjectBody as Buffer).toString()), resultado);
+    }
     if (caso !== "rechazo") assert.ok(resultado.clasificacion);
     assert.doesNotMatch(JSON.stringify(resultado), /SECRETO/);
     assert.deepEqual(resultadoInterfaz(resultado).json_final, resultado);

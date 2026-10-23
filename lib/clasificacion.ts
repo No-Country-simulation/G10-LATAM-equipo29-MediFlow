@@ -7,6 +7,7 @@
  */
 import { GoogleGenAI, type GenerateContentParameters } from "@google/genai";
 import { z } from "zod";
+import { MAX_BYTES_BINARIO } from "./limites-documento";
 
 export const CATEGORIAS_DOCUMENTO = [
   "RECETA_MEDICA",
@@ -50,7 +51,7 @@ export const MODELO_GEMINI_POR_DEFECTO = "gemini-3.5-flash-lite";
 
 /** El límite de la solicitud inline de Gemini es 20 MB en total, y base64
  * agrega ~33%. Se deja margen para el prompt. */
-export const MAX_BYTES_INLINE = 14 * 1024 * 1024;
+export const MAX_BYTES_INLINE = MAX_BYTES_BINARIO;
 
 /** Máximo de caracteres de texto/JSON que se envían al modelo. */
 const MAX_CARACTERES_TEXTO = 50_000;
@@ -146,7 +147,7 @@ const MIME_POR_EXTENSION: Record<string, string> = {
 
 export interface EntradaClasificacion {
   contenido: Uint8Array;
-  /** Extensión validada del original (pdf, jpg, png, tiff, webp, json). */
+  /** Extensión validada del original (pdf, jpg, png, webp, json). */
   extension: string;
 }
 

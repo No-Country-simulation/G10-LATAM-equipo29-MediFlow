@@ -9,6 +9,7 @@ import VistaResultado from "@/components/VistaResultado";
 import { CANALES, formatearTamano } from "@/components/etiquetas";
 import type { Fase, Resultado } from "@/components/tipos";
 import { recibirEventos, resultadoInterfaz } from "@/lib/cliente-flujo";
+import { MAX_BYTES_BINARIO } from "@/lib/limites-documento";
 
 // La escena 3D solo existe en el navegador y se carga aparte del resto.
 const EscenaMedica = dynamic(() => import("@/components/EscenaMedica"), {
@@ -75,6 +76,14 @@ export default function Pagina() {
   }
   function enviarArchivo() {
     if (!archivo || enviando) return;
+    const esTiff = /\.tiff?$/i.test(archivo.name) || archivo.type === "image/tiff";
+    if (esTiff || (!/\.json$/i.test(archivo.name) && archivo.size > MAX_BYTES_BINARIO)) {
+      setResultado({ ok: false, body: { detalle: esTiff
+        ? "TIFF no está soportado. Utilice PDF, JPG, PNG o WEBP."
+        : "El archivo binario excede el máximo permitido de 14 MiB." } });
+      setFase("error");
+      return;
+    }
     const formData = new FormData();
     formData.append("archivo", archivo);
     formData.append("canal_origen", canalArchivo);
@@ -188,7 +197,7 @@ export default function Pagina() {
                     id="archivo"
                     className="zona__entrada"
                     type="file"
-                    accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,.webp,.json"
+                    accept=".pdf,.jpg,.jpeg,.png,.webp,.json"
                     onChange={(e) => setArchivo(e.target.files?.[0] ?? null)}
                   />
                   <span className="zona__cuerpo">
@@ -213,7 +222,7 @@ export default function Pagina() {
                       <>
                         <strong>Arrastre un documento o haga clic para elegirlo</strong>
                         <span className="zona__ayuda">
-                          PDF, JPG, PNG, TIFF, WEBP o JSON
+                          PDF, JPG, PNG, WEBP o JSON. PDF e imágenes: máximo 14 MiB.
                         </span>
                       </>
                     )}

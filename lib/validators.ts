@@ -6,12 +6,13 @@
  *   2) Content-Type declarado por el cliente.
  *   3) Firma binaria real de los primeros bytes (magic numbers).
  *
- * Formatos estrictamente soportados: PDF, IMAGEN (jpg/png/tiff/webp),
+ * Formatos estrictamente soportados: PDF, IMAGEN (jpg/png/webp),
  * JSON (UTF-8 y sintaxis válida) y TEXTO (ver validarTextoJson).
  */
 import { TipoArchivo } from "./types";
+import { MAX_BYTES_BINARIO } from "./limites-documento";
 
-export const TAMANO_MAXIMO_BYTES = 15 * 1024 * 1024; // 15 MB por documento clínico
+export const TAMANO_MAXIMO_BYTES = 15 * 1024 * 1024; // Tope del contenedor JSON/texto; binarios: 14 MiB.
 /** Tope al releer un original desde OCI (etapas posteriores a la ingesta). */
 export const MAX_BYTES_LECTURA = TAMANO_MAXIMO_BYTES;
 
@@ -29,8 +30,6 @@ const EXTENSIONES_A_TIPO: Record<string, TipoArchivo> = {
   ".jpg": "IMAGEN",
   ".jpeg": "IMAGEN",
   ".png": "IMAGEN",
-  ".tif": "IMAGEN",
-  ".tiff": "IMAGEN",
   ".webp": "IMAGEN",
   ".json": "JSON",
   ".txt": "TEXTO",
@@ -41,7 +40,6 @@ const MIME_A_TIPO: Record<string, TipoArchivo> = {
   "image/jpeg": "IMAGEN",
   "image/png": "IMAGEN",
   "image/webp": "IMAGEN",
-  "image/tiff": "IMAGEN",
   "application/json": "JSON",
   "text/plain": "TEXTO",
 };
@@ -65,8 +63,6 @@ function detectarPorFirmaBinaria(bytes: Uint8Array): TipoArchivo | null {
   if (inicia([0x25, 0x50, 0x44, 0x46, 0x2d])) return "PDF"; // %PDF-
   if (inicia([0xff, 0xd8, 0xff])) return "IMAGEN"; // JPEG
   if (inicia([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "IMAGEN"; // PNG
-  if (inicia([0x49, 0x49, 0x2a, 0x00])) return "IMAGEN"; // TIFF little-endian
-  if (inicia([0x4d, 0x4d, 0x00, 0x2a])) return "IMAGEN"; // TIFF big-endian
   if (inicia([0x52, 0x49, 0x46, 0x46])) return "IMAGEN"; // RIFF (confirmar WEBP aparte)
   return null;
 }
@@ -79,12 +75,16 @@ export function validarArchivo(
 ): ResultadoValidacion {
   const tamano = contenido.byteLength;
 
+  if (/\.tiff?$/i.test(nombreArchivo) || contentType?.split(";")[0].trim().toLowerCase() === "image/tiff") {
+    throw new FormatoNoSoportadoError("TIFF no está soportado. Utilice PDF, JPG, PNG o WEBP.");
+  }
+
   if (tamano === 0) {
     throw new FormatoNoSoportadoError("El archivo está vacío.");
   }
   if (tamano > TAMANO_MAXIMO_BYTES) {
     throw new ArchivoDemasiadoGrandeError(
-      `El archivo pesa ${tamano} bytes; el máximo permitido es ${TAMANO_MAXIMO_BYTES} bytes.`,
+      "El archivo excede el tamaño permitido: PDF e imágenes hasta 14 MiB; contenedor JSON hasta 15 MiB.",
     );
   }
 
@@ -107,6 +107,10 @@ export function validarArchivo(
       "El contenido del archivo no corresponde a ningún formato soportado " +
         "(PDF, IMAGEN, JSON).",
     );
+  }
+
+  if (tipoFirma !== "JSON" && tamano > MAX_BYTES_BINARIO) {
+    throw new ArchivoDemasiadoGrandeError("El archivo binario excede el máximo permitido de 14 MiB.");
   }
 
   // WEBP comparte la firma contenedora RIFF; se confirma el subtipo en el offset 8.
