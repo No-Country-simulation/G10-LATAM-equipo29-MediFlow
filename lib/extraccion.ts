@@ -1,3 +1,5 @@
+import { evaluarSuficiencia } from "./suficiencia-clinica";
+import type { CategoriaDocumento } from "./clasificacion";
 import { ESQUEMA_EXTRACCION, type DatosClinicos } from "./esquema-clinico";
 import { decidirEnrutamiento } from "./decision-enrutamiento";
 import { evaluarConfianza } from "./confianza-extraccion";
@@ -69,6 +71,7 @@ function prepararDocumento(entrada: EntradaClasificacion) {
 export async function extraerDocumento(
   entrada: EntradaClasificacion,
   obtenerConexion: () => ConexionGemini = obtenerConexionGemini,
+  categoria?: CategoriaDocumento,
 ) {
   const { partes } = prepararDocumento(entrada);
   const { generar, modelo } = obtenerConexion();
@@ -97,6 +100,7 @@ export async function extraerDocumento(
     throw new ErrorExtraccion(502, "Los datos extraídos no cumplen el esquema de estructura y tipos.", validacion);
   }
   const confianza_documento = await evaluarConfianza(datos as DatosClinicos, partes, { generar, modelo });
-  const decision = await decidirEnrutamiento(datos as DatosClinicos, confianza_documento, { generar, modelo });
-  return { datos_extraidos: datos as DatosClinicos, validacion, confianza_documento, ...decision, version_prompt: VERSION_PROMPT_EXTRACCION };
+  const suficiencia_clinica = await evaluarSuficiencia(datos as DatosClinicos, partes, { generar, modelo }, categoria);
+  const decision = await decidirEnrutamiento(datos as DatosClinicos, confianza_documento, { generar, modelo }, suficiencia_clinica);
+  return { datos_extraidos: datos as DatosClinicos, validacion, confianza_documento, suficiencia_clinica, ...decision };
 }

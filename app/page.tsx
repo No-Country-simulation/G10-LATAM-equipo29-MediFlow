@@ -6,8 +6,9 @@ import { useEffect, useRef, useState } from "react";
 import Etapas from "@/components/Etapas";
 import type { EstadoEscena } from "@/components/EscenaMedica";
 import VistaResultado from "@/components/VistaResultado";
+import ResumenResultado from "@/components/ResumenResultado";
 import { CANALES, formatearTamano } from "@/components/etiquetas";
-import type { Fase, Resultado } from "@/components/tipos";
+import { leer, type Fase, type Resultado } from "@/components/tipos";
 import { recibirEventos, resultadoInterfaz } from "@/lib/cliente-flujo";
 import { MAX_BYTES_BINARIO } from "@/lib/limites-documento";
 
@@ -41,6 +42,14 @@ function Logo() {
 export default function Pagina() {
   const [tab, setTab] = useState<"archivo" | "json">("archivo");
   const [fase, setFase] = useState<Fase>("reposo");
+  const [verDetalle, setVerDetalle] = useState(false);
+  const [nombreResultado, setNombreResultado] = useState("");
+  const botonDetalle = useRef<HTMLDivElement>(null);
+  const encabezadoDetalle = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (verDetalle) encabezadoDetalle.current?.focus();
+    else botonDetalle.current?.querySelector("button")?.focus();
+  }, [verDetalle]);
   const [resultado, setResultado] = useState<Resultado | null>(null);
 
   // --- estado: pestaña archivo ---
@@ -53,12 +62,14 @@ export default function Pagina() {
   const [tipoJson, setTipoJson] = useState<"JSON" | "TEXTO">("TEXTO");
   const [canalJson, setCanalJson] = useState("Otro");
 
+  const documentoResultado = leer<{ documento_id: string; nombre_original: string }>(resultado?.body);
   const panelResultado = useRef<HTMLDivElement>(null);
   const enviando =
     fase === "ingesta" || fase === "clasificacion" || fase === "extraccion" || fase === "enrutamiento" || fase === "almacenamiento";
 
   /** El servidor coordina las etapas y confirma la escritura terminal en OCI. */
   async function ejecutarFlujo(contenido: FormData | string) {
+    setVerDetalle(false);
     setResultado(null);
     setFase("ingesta");
     try {
@@ -76,6 +87,7 @@ export default function Pagina() {
   }
   function enviarArchivo() {
     if (!archivo || enviando) return;
+    setNombreResultado(archivo.name);
     const esTiff = /\.tiff?$/i.test(archivo.name) || archivo.type === "image/tiff";
     if (esTiff || (!/\.json$/i.test(archivo.name) && archivo.size > MAX_BYTES_BINARIO)) {
       setResultado({ ok: false, body: { detalle: esTiff
@@ -92,6 +104,7 @@ export default function Pagina() {
 
   function enviarJson() {
     if (!texto.trim() || enviando) return;
+    setNombreResultado(tipoJson === "JSON" ? "Documento JSON" : "Documento de texto");
     const contenido = JSON.stringify({ tipo_archivo: tipoJson, documento_texto: texto, canal_origen: canalJson });
     void ejecutarFlujo(contenido);
   }
@@ -115,7 +128,7 @@ export default function Pagina() {
 
   return (
     <>
-      <section className="portada">
+      <section className="portada" hidden={verDetalle}>
         <header className="portada__barra">
           <span className="marca">
             <Logo />
@@ -143,7 +156,7 @@ export default function Pagina() {
       </section>
 
       <main id="recepcion" className="mesa">
-        <div className="mesa__interior">
+        <div className="mesa__interior" hidden={verDetalle}>
           <div className="entrada">
             <div className="pestanas" role="tablist" aria-label="Forma de envío">
               <span
@@ -330,7 +343,7 @@ export default function Pagina() {
           <aside className="avance" aria-live="polite" ref={panelResultado}>
             <Etapas fase={fase} resultado={resultado} />
             {resultado ? (
-              <VistaResultado resultado={resultado} />
+              <div ref={botonDetalle}><ResumenResultado resultado={resultado} fase={fase} nombre={nombreResultado} onDetalle={() => setVerDetalle(true)} /></div>
             ) : (
               <p className="vacio">
                 Cuando envíe un documento, aquí verá su recepción y los datos clínicos extraídos.
@@ -339,6 +352,17 @@ export default function Pagina() {
           </aside>
         </div>
 
+        {verDetalle && resultado && <section className="detalle-documento" aria-labelledby="titulo-detalle">
+          <button className="boton detalle-volver" onClick={() => setVerDetalle(false)}>← Volver al resumen</button>
+          <header className="detalle-encabezado">
+            <p>MEDIFLOW · RESULTADO DEL DOCUMENTO</p>
+            <h1 id="titulo-detalle" ref={encabezadoDetalle} tabIndex={-1}>{documentoResultado.documento_id || "ID de documento aún no asignado"}</h1>
+            {(documentoResultado.nombre_original || nombreResultado) && <p>Nombre original / entrada: {documentoResultado.nombre_original || nombreResultado}</p>}
+            <p>Datos extraídos y trazabilidad del procesamiento. Validación clínica pendiente.</p>
+          </header>
+          {enviando && <p role="status">{TEXTO_BOTON[fase]}</p>}
+          <VistaResultado resultado={resultado} />
+        </section>}
         <footer className="pie">
           Proyecto del Hackathon ONE, grupo 10 (Oracle Next Education y Alura).
         </footer>

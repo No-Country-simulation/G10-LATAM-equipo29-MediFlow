@@ -336,7 +336,7 @@ La confianza de clasificación no representa una validación de los datos extra�
 La decisión de revisión humana queda para etapas posteriores.
 
 La respuesta `200` incluye `status: "extraido"`, `documento_id`, `datos_extraidos`,
-`version_prompt`, `extraido_en` y `validacion`, sin `modelo` ni `resultado_oci`.
+`extraido_en` y `validacion`, sin `version_prompt`, `modelo` ni `resultado_oci`.
 La interfaz muestra las entidades; una extracción fallida detiene el flujo.
 
 Errores: `400/422` entrada inválida; `413` más de 14 MiB
@@ -397,7 +397,7 @@ Clasificación, persistencia OCI y enrutamiento normal están activos en `/api/p
 
 ## Confianza de la extracción clínica
 
-`lib/confianza-extraccion.ts` implementa el algoritmo versionado `1.0`. La respuesta
+`lib/confianza-extraccion.ts` implementa el algoritmo versionado `1.2`. La respuesta
 incluye `extraccion.confianza_documento`, independiente de `clasificacion.confianza`.
 Gemini coteja el original completo con cada campo extraído y devuelve observaciones
 estructuradas; el servidor valida ese informe y calcula el puntaje, no lo solicita al LLM.
@@ -425,6 +425,46 @@ Si el evaluador falla, su respuesta es inválida o incompleta, o no hay datos
 clínicos evaluables, se conserva la extracción estructuralmente válida y se devuelve
 `estado: "no_evaluable"`, `score: null` y revisión humana requerida. Si falla el
 JSON Schema, se deriva a auditoría humana antes de llamar al evaluador.
+
+Cuando no se obtiene un score, `extraccion.confianza_documento.diagnostico`
+registra un `codigo`, una `etapa` y un `mensaje` seguro. Los fallos HTTP incluyen
+`http_status` cuando el SDK lo proporciona. Se distinguen límite o cuota (429),
+acceso denegado, modelo no encontrado, solicitud rechazada, error del servidor,
+tiempo de espera/cancelación, respuesta vacía, JSON inválido y evaluación inválida.
+Un 429 no confirma por sí solo que se hayan agotado los créditos. Los errores sin
+causa identificable conservan `EVALUACION_NO_DISPONIBLE`.
+
+Una evaluación incompleta incluye `conteos`: campos esperados, recibidos, faltantes,
+duplicados y desconocidos, y secciones de omisión desconocidas o duplicadas. Estos
+conteos describen el informe del evaluador, no omisiones clínicas del documento.
+No se almacenan mensajes crudos del SDK, respuestas inválidas ni rutas desconocidas.
+La causa se incorpora a la justificación de auditoría y se muestra en el resumen
+y en Calidad y revisión. El score permanece `null` y se conservan los datos extraídos;
+no se modifican pesos, umbrales ni las condiciones de revisión humana. Los resultados
+anteriores sin diagnóstico siguen siendo compatibles, pero no se completan retroactivamente.
+
+La versión 1.1 conserva `omisiones` por sección, con `detalles` de campo del contrato,
+cantidad y página (o null si no se identificó). Las rutas con `*` indican tipos de campos
+en listas, no una entrada concreta. Se validan las rutas, la sección y la suma de cantidades.
+Los `campos_observados` pueden incluir causa y página. No se solicitan valores clínicos
+ni citas para estos diagnósticos. Se conservan también unidades ilegibles y conflicto
+documental; si no se identificó su ubicación concreta, la interfaz lo declara.
+La justificación de auditoría resume hasta tres observaciones; Calidad y revisión
+muestra todas. Los pesos y umbrales no cambian. Las evaluaciones antiguas sin detalle
+se muestran indicando expresamente la información que no quedó registrada.
+
+La versión 1.2 delimita el cotejo a información clínica e identificación/trazabilidad.
+No exige transcripción literal: redacción equivalente, cambios de orden y repeticiones
+sin información nueva no son omisiones. Excluye cortesías, publicidad, créditos,
+marcas de agua, instrucciones de impresión y encabezados sin datos; esos elementos
+tampoco deben influir en los conteos de legibilidad. Antes de reportar una omisión,
+el evaluador debe buscar el dato en toda la extracción y comprobar su relevancia.
+Se mantienen las observaciones por pérdida de medicamentos, dosis, contexto temporal,
+negaciones, identificación del paciente/profesional y otros datos clínicos. Las
+indicaciones de cuidados no se excluyen por usar lenguaje común. Esta delimitación
+se realiza en el prompt; sigue dependiendo del cotejo del modelo y no garantiza
+resultados idénticos entre ejecuciones. No se relajan pesos, umbrales ni la revisión
+ante omisiones relevantes reportadas. No añade validación de suficiencia médica.
 
 Este es un indicador heurístico con pesos y umbrales provisionales: `calibrado: false`.
 El cotejo utiliza el mismo modelo Gemini configurado para extraer, por lo que puede
@@ -491,3 +531,49 @@ Un fallo de esta llamada muestra error y conserva los datos extraídos; no deriv
 el documento nuevamente a auditoría. Los consumidores directos de la API deben
 utilizar `/api/process` para el flujo completo: el endpoint individual de rutas no comprueba etapas previas.
 
+
+
+## Revisión preliminar de suficiencia clínica
+
+`extraccion.suficiencia_clinica` añade una etapa independiente del JSON Schema y
+la confianza de extracción. Conserva los datos sin corregirlos. Registra estado,
+hallazgos con ruta/código/mensaje/origen y necesidad de revisión humana.
+
+Reglas locales: falta de nombre e identificador del paciente; medicamentos sin
+nombre; y, cuando la clasificación es RECETA_MEDICA, falta de profesional
+identificado o ausencia de medicamentos. `/api/process` transmite la categoría
+aceptada a esta etapa. En extracción directa sin clasificación, las comprobaciones
+contextuales dependen del documento y no se asume que toda mención de medicamentos
+sea una receta.
+
+Una llamada adicional a Gemini revisa ambigüedades de nombres, pauta incompleta,
+datos relevantes ausentes y contexto del paciente necesario para interpretar la
+indicación. Recibe original, extracción y categoría, cuando está disponible. No
+exige datos de administración a medicamentos meramente históricos. Los nombres
+personales inusuales no constituyen un error ortográfico. Las rutas y códigos de
+respuesta se validan; los mensajes visibles se construyen localmente sin copiar
+respuestas libres del modelo.
+
+No hay catálogo farmacológico conectado. El resultado no verifica existencia,
+ortografía oficial, seguridad de dosis, interacciones o idoneidad del tratamiento.
+`sin_hallazgos` significa que las comprobaciones no detectaron observaciones; no
+certifica corrección médica. La revisión contextual es una propuesta del modelo.
+La referencia de alcance para prescripciones incluye nombre, dosis, vía y frecuencia,
+y contexto del paciente cuando resulta relevante:
+https://www.acog.org/clinical/clinical-guidance/committee-opinion/articles/2012/08/improving-medication-safety
+No se implementa un protocolo clínico ni una regla jurídica de esa jurisdicción.
+
+Cualquier hallazgo o fallo de esta evaluación bloquea la prioridad automática y
+propone auditoría humana; se conserva el resultado en el JSON final. Si también
+falla la confianza, se conserva su justificación y los hallazgos de suficiencia se
+consultan en Calidad y revisión. La llamada adicional aumenta latencia y consumo
+de Gemini. Los resultados anteriores no se completan retroactivamente.
+
+
+Suficiencia clínica 1.1: una regla local reconoce etiquetas numeradas completas
+como `Medicamento 1`, `Medicamento #2` o `Medicamento N.º 3` (sin distinguir
+mayúsculas). Registra `MEDICAMENTO_ETIQUETA_GENERICA`, origen `regla`, y un mensaje
+con la etiqueta detectada, conservando el dato original. No usa coincidencias
+parciales ni considera genérico un nombre solo por incluir números o dosis.
+El hallazgo persiste aunque Gemini no lo reporte o falle; una observación
+`MEDICAMENTO_AMBIGUO` para el mismo campo no se duplica. Otros hallazgos se conservan.

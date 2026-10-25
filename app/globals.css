@@ -770,3 +770,48 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+/* Resumen y consulta amplia del resultado */
+[hidden] { display: none !important; }
+.resumen h3 { margin: 0 0 1.25rem; overflow-wrap: anywhere; font-size: 1.3rem; }
+.resumen__estado { color: var(--tinta-suave); font-weight: 600; font-size: .9rem; }
+.resumen__datos { margin: 0 0 1.25rem; display: grid; gap: .9rem; }
+.resumen__datos dt, .ficha-campos dt { color: var(--tinta-suave); font-size: .8rem; }
+.resumen__datos dd { margin: .2rem 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.resumen__alerta { padding: 1rem; background: #fff3d7; color: #664714; border-left: 3px solid #bb8520; border-radius: 8px; margin: 1rem 0; font-size: .9rem; }
+.resumen__alerta p { margin-bottom: 0; }
+.detalle-documento { max-width: 1320px; margin: 6rem auto 0; padding: clamp(1rem, 3vw, 2.5rem); background: var(--hoja); border: 1px solid var(--linea); border-radius: 24px; }
+.detalle-encabezado { margin: 2rem 0; }
+.detalle-encabezado > p:first-child { font-size: .75rem; letter-spacing: .12em; }
+.detalle-encabezado h1 { font-size: clamp(1.6rem, 3vw, 2.5rem); overflow-wrap: anywhere; }
+.detalle-encabezado p { color: var(--tinta-suave); }
+.detalle-navegacion { display: flex; flex-wrap: wrap; gap: .5rem; padding: 1rem 0; border-bottom: 1px solid var(--linea); margin-bottom: 1.5rem; }
+.detalle-navegacion button { font: inherit; font-size: .9rem; padding: .75rem 1rem; border: 1px solid var(--linea); border-radius: 10px; background: transparent; color: var(--tinta); cursor: pointer; }
+.detalle-navegacion button[aria-current] { background: var(--tinta); color: var(--hoja); }
+.detalle-documento .resultado { padding: 0; background: transparent; border: 0; }
+.detalle-documento .dato { grid-template-columns: minmax(10rem, .3fr) minmax(0, 1fr); align-items: start; }
+.detalle-documento .dato dd { display: block; }
+.detalle-documento .crudo pre { max-height: 65vh; }
+.fichas-clinicas { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1.25rem; }
+.ficha-clinica { min-width: 0; padding: 1.25rem; border: 1px solid var(--linea); border-radius: 14px; background: rgba(255,255,255,.55); }
+.ficha-clinica--ancha { grid-column: 1 / -1; }
+.ficha-clinica h5 { font-size: 1rem; margin: 0 0 1rem; }
+.ficha-campos { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 1rem; margin: 0; }
+.ficha-campos dd { margin: .3rem 0 0; overflow-wrap: anywhere; }
+.lista-clinica { display: grid; gap: 1rem; padding-left: 1.25rem; margin: 0; }
+.lista-clinica > li + li { padding-top: 1rem; border-top: 1px solid var(--linea); }
+.sin-datos { color: var(--tinta-suave); font-weight: 400; }
+.tabla-clinica { overflow-x: auto; }
+.tabla-clinica table { border-collapse: collapse; width: 100%; font-size: .88rem; text-align: left; }
+.tabla-clinica caption { text-align: left; font-size: 1rem; font-weight: 700; padding-bottom: 1rem; }
+.tabla-clinica th { background: rgba(15,42,45,.06); font-size: .8rem; }
+.tabla-clinica th, .tabla-clinica td { padding: .8rem; border-bottom: 1px solid var(--linea); vertical-align: top; min-width: 105px; max-width: 300px; overflow-wrap: anywhere; }
+.campos-ausentes { margin-top: 1.5rem; }
+.campos-ausentes summary { cursor: pointer; color: var(--tinta-suave); padding: .75rem 0; }
+.detalle-documento button:focus-visible, .tabla-clinica:focus-visible { outline: 3px solid #128577; outline-offset: 3px; }
+@media (max-width: 700px) {
+  .fichas-clinicas { grid-template-columns: minmax(0, 1fr); }
+  .detalle-documento .dato { grid-template-columns: minmax(0, 1fr); }
+  .detalle-documento { margin-top: 6rem; }
+  .detalle-navegacion button { flex: 1 1 140px; }
+}

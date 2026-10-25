@@ -1,3 +1,4 @@
+import { PROMPT_SUFICIENCIA, evaluarSuficiencia } from "../lib/suficiencia-clinica";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createElement } from "react";
@@ -90,6 +91,7 @@ function simular(respuesta: unknown = datos()) {
   const conectar = (): ConexionGemini => ({ modelo: "modelo-prueba", async generar(params) {
     llamadas.push(params);
     if (respuesta instanceof Error) throw respuesta;
+    if (params.config?.systemInstruction === PROMPT_SUFICIENCIA) return { text: JSON.stringify({ observaciones: [] }) };
     if (params.config?.systemInstruction === PROMPT_EVALUACION) return { text: JSON.stringify(evaluacion(respuesta)) };
     if (params.config?.systemInstruction === PROMPT_PRIORIDAD) return { text: JSON.stringify({ nivel: "NORMAL", justificacion: "Receta de seguimiento documentado." }) };
     return { text: typeof respuesta === "string" ? respuesta : JSON.stringify(respuesta) };
@@ -103,9 +105,9 @@ test("extrae texto completo, valida y conserva ausencias sin inventar datos", as
   assert.deepEqual(resultado.datos_extraidos, datos());
   assert.equal("requiere_revision_humana" in resultado, false);
   assert.equal(resultado.validacion.valido, true);
-  assert.equal(resultado.version_prompt, "3.1");
+  assert.equal("version_prompt" in resultado, false);
   assert.equal(resultado.confianza_documento.score, 1);
-  assert.equal(gemini.llamadas.length, 3);
+  assert.equal(gemini.llamadas.length, 4);
   assert.equal(resultado.decision_enrutamiento.destino_principal, "Ruta_Normal");
   assert.equal(gemini.llamadas[1].config?.systemInstruction, PROMPT_EVALUACION);
   const solicitud = JSON.stringify(gemini.llamadas[0]);
@@ -179,7 +181,7 @@ test("conserva datos ausentes sin evaluar consistencia clínica", async () => {
   const d = vacio();
   const resultado = await extraerDocumento(entrada(), simular(d).conectar);
   assert.deepEqual(resultado.datos_extraidos, d);
-  assert.deepEqual(Object.keys(resultado).sort(), ["confianza_documento", "datos_extraidos", "decision_enrutamiento", "evaluacion_confianza", "prioridad_urgencia", "validacion", "version_prompt"]);
+  assert.deepEqual(Object.keys(resultado).sort(), ["confianza_documento", "datos_extraidos", "decision_enrutamiento", "evaluacion_confianza", "prioridad_urgencia", "suficiencia_clinica", "validacion"]);
   assert.equal(resultado.confianza_documento.score, null);
 });
 
@@ -332,8 +334,9 @@ test("API extrae JSON/texto y archivos directamente sin leer ni escribir OCI", a
     assert.match(String(url), /generativelanguage.googleapis.com/);
     llamadas.push(String(init?.body));
     const esEvaluacion = String(init?.body).includes("Coteja una extracción");
+    const esSuficiencia = String(init?.body).includes("Revisa suficiencia documental");
     const esPrioridad = String(init?.body).includes("Evalúa la prioridad documental");
-    const salida = esPrioridad ? { nivel: "NORMAL", justificacion: "Seguimiento documentado." } : esEvaluacion ? evaluacion() : datos();
+    const salida = esSuficiencia ? { observaciones: [] } : esPrioridad ? { nivel: "NORMAL", justificacion: "Seguimiento documentado." } : esEvaluacion ? evaluacion() : datos();
     return Response.json({ candidates: [{ content: { role: "model", parts: [{ text: invalido ? "{}" : JSON.stringify(salida) }] }, finishReason: "STOP" }] });
   });
   const solicitar = (body: unknown) => POST(new Request("http://localhost/api/ingest/extract", {
@@ -362,7 +365,7 @@ test("API extrae JSON/texto y archivos directamente sin leer ni escribir OCI", a
       form.set("archivo", new File([bytes], nombre, { type: mime }));
       const r = await POST(new Request("http://localhost/api/ingest/extract", { method: "POST", body: form }));
       assert.equal(r.status, 200);
-      if (mime !== "application/json") assert.ok(llamadas.at(-2)?.includes(bytes.toString("base64")));
+      if (mime !== "application/json") assert.ok(llamadas.at(-3)?.includes(bytes.toString("base64")));
     }
     const antes = llamadas.length;
     assert.equal((await solicitar({ documento_id: id, ruta_objeto: "recibidos/antiguo.json" })).status, 422);
@@ -402,3 +405,191 @@ test("API extrae JSON/texto y archivos directamente sin leer ni escribir OCI", a
   }
 });
 
+
+test("diagnóstico: distingue fallos del proveedor sin exponer mensajes ni datos", async () => {
+  for (const [status, codigo] of [[429, "EVALUACION_LIMITE_O_CUOTA"], [403, "EVALUACION_ACCESO_DENEGADO"],
+    [401, "EVALUACION_ACCESO_DENEGADO"], [404, "EVALUACION_MODELO_NO_ENCONTRADO"],
+    [400, "EVALUACION_SOLICITUD_RECHAZADA"], [503, "EVALUACION_SERVICIO_NO_DISPONIBLE"],
+    [500, "EVALUACION_SERVICIO_NO_DISPONIBLE"], [504, "EVALUACION_TIEMPO_AGOTADO"]] as const) {
+    const r = await evaluarConfianza(datos(), [], { modelo: "prueba", generar: async () => {
+      throw Object.assign(new Error("SECRETO_CLINICO"), { status, body: "SECRETO_CLINICO" });
+    } });
+    assert.equal(r.score, null);
+    assert.equal(r.diagnostico?.codigo, codigo);
+    assert.equal(r.diagnostico?.http_status, status);
+    assert.equal(r.diagnostico?.etapa, "proveedor");
+    assert.equal(r.requiere_revision_humana, true);
+    assert.doesNotMatch(JSON.stringify(r), /SECRETO_CLINICO/);
+  }
+  for (const name of ["TimeoutError", "AbortError", "Error"]) {
+    const r = await evaluarConfianza(datos(), [], { modelo: "prueba", generar: async () => {
+      throw Object.assign(new Error("SECRETO"), { name });
+    } });
+    assert.equal(r.diagnostico?.codigo, name === "Error" ? "EVALUACION_NO_DISPONIBLE" : "EVALUACION_TIEMPO_AGOTADO");
+    assert.equal(r.diagnostico?.http_status, undefined);
+  }
+});
+
+test("diagnóstico: separa respuesta vacía, JSON inválido y esquema inválido", async () => {
+  for (const [text, codigo] of [[undefined, "EVALUACION_RESPUESTA_VACIA"], ["   ", "EVALUACION_RESPUESTA_VACIA"],
+    ["{SECRETO", "EVALUACION_JSON_INVALIDO"], ['{"SECRETO":true}', "EVALUACION_INVALIDA"]] as const) {
+    const r = await evaluarConfianza(datos(), [], { modelo: "prueba", generar: async () => ({ text }) });
+    assert.equal(r.diagnostico?.codigo, codigo);
+    assert.equal(r.score, null);
+    assert.doesNotMatch(JSON.stringify(r), /SECRETO/);
+  }
+});
+
+test("diagnóstico: cuenta faltantes, duplicados y desconocidos sin devolver rutas del modelo", () => {
+  const e = evaluacion();
+  const original = structuredClone(e);
+  e.campos = [...e.campos.slice(1), e.campos[1], { ruta: "/SECRETO", estado: "respaldado" }];
+  e.omisiones = [{ seccion: "SECRETO", cantidad: 1 }, { seccion: "SECRETO", cantidad: 2 }];
+  const r = calcularConfianza(datos(), e);
+  assert.deepEqual(r.diagnostico?.conteos, {
+    campos_esperados: original.campos.length, campos_recibidos: original.campos.length + 1,
+    campos_faltantes: 1, campos_duplicados: 1, campos_desconocidos: 1,
+    secciones_omision_desconocidas: 2, secciones_omision_duplicadas: 1,
+  });
+  assert.doesNotMatch(JSON.stringify(r), /SECRETO/);
+  assert.equal(calcularConfianza(datos(), original).diagnostico, undefined);
+  assert.equal(calcularConfianza(datos(), original).score, 1);
+});
+
+test("diagnóstico: conserva extracción y propaga causa a auditoría y a la interfaz", async () => {
+  const resultado = await extraerDocumento(entrada(), () => ({ modelo: "prueba", async generar(params) {
+    if (params.config?.systemInstruction === PROMPT_SUFICIENCIA) return { text: JSON.stringify({ observaciones: [] }) };
+    if (params.config?.systemInstruction === PROMPT_EVALUACION) throw Object.assign(new Error("SECRETO"), { status: 429 });
+    assert.notEqual(params.config?.systemInstruction, PROMPT_PRIORIDAD);
+    return { text: JSON.stringify(datos()) };
+  } }));
+  assert.deepEqual(resultado.datos_extraidos, datos());
+  assert.equal(resultado.confianza_documento.score, null);
+  assert.match(resultado.decision_enrutamiento.justificacion_enrutamiento, /límite de solicitudes o cuota/);
+  assert.equal(resultado.decision_enrutamiento.destino_principal, "Cola_Auditoria_Humana");
+  const html = renderToStaticMarkup(createElement(VistaResultado, {
+    resultado: { ok: true, body: {}, extraccion: { ok: true, body: resultado } },
+  }));
+  assert.match(html, /No se pudo calcular el score de confianza/);
+  assert.match(html, /HTTP 429/);
+  assert.doesNotMatch(html, /SECRETO/);
+});
+
+test("omisiones: conserva campo, cantidad y página y explica auditoría con score alto", async () => {
+  const e = evaluacion();
+  e.omisiones = [{ seccion: "medicamentos", cantidad: 1, detalles: [{ campo: "/medicamentos/*/concentracion", cantidad: 1, pagina: 2 }] }];
+  const r = calcularConfianza(datos(), e);
+  assert.ok(r.score! > 0.85);
+  assert.deepEqual(r.omisiones, e.omisiones);
+  const decision = await decidirEnrutamiento(datos(), r, { modelo: "prueba", generar: async () => { throw new Error("No llamar"); } });
+  assert.match(decision.decision_enrutamiento.justificacion_enrutamiento, /concentracion/);
+  assert.match(decision.decision_enrutamiento.justificacion_enrutamiento, /Página 2/);
+  const html = renderToStaticMarkup(createElement(VistaResultado, { resultado: { ok: true, body: {}, extraccion: { ok: true, body: { confianza_documento: r, ...decision } } } }));
+  assert.match(html, /Observaciones reportadas por el evaluador/);
+  assert.match(html, /concentracion/);
+  assert.match(html, /No evaluada por observaciones previas/);
+});
+
+test("omisiones: rechaza detalles fuera del contrato, de otra sección o con conteos inconsistentes", () => {
+  const e = evaluacion();
+  for (const detalles of [
+    [{ campo: "/SECRETO", cantidad: 1, pagina: 1 }],
+    [{ campo: "/paciente/nombre", cantidad: 1, pagina: 1 }],
+    [{ campo: "/medicamentos/*/dosis", cantidad: 2, pagina: 1 }],
+    [{ campo: "/medicamentos/*/dosis", cantidad: 1, pagina: 0 }],
+  ]) {
+    const r = calcularConfianza(datos(), { ...e, omisiones: [{ seccion: "medicamentos", cantidad: 1, detalles }] });
+    assert.equal(r.score, null);
+    assert.doesNotMatch(JSON.stringify(r), /SECRETO/);
+  }
+});
+
+test("observaciones: mantiene compatibilidad con omisiones sin detalle y explica campo contradictorio", () => {
+  const e = evaluacion();
+  e.omisiones = [{ seccion: "medicamentos", cantidad: 1 }];
+  e.campos[0] = { ...e.campos[0], estado: "contradictorio", causa: "atribucion_incorrecta", pagina: 1 };
+  const r = calcularConfianza(datos(), e);
+  assert.equal(r.estado, "evaluado");
+  assert.deepEqual(r.campos_observados[0], e.campos[0]);
+  const html = renderToStaticMarkup(createElement(VistaResultado, { resultado: { ok: true, body: {}, extraccion: { ok: true, body: { confianza_documento: r } } } }));
+  assert.match(html, /no identificó los campos concretos/);
+  assert.match(html, /se atribuyó incorrectamente/);
+  assert.match(html, /Página 1/);
+});
+
+test("suficiencia: detecta identificación ausente y medicamento sin nombre sin modificar datos", async () => {
+  const d = datos(); d.paciente.nombre = null; d.paciente.identificacion = null; d.profesionales = []; d.medicamentos[0].nombre = null;
+  const original = structuredClone(d);
+  const r = await evaluarSuficiencia(d, [], { modelo: "prueba", generar: async () => ({ text: '{"observaciones":[]}' }) }, "RECETA_MEDICA");
+  assert.equal(r.estado, "requiere_revision");
+  assert.deepEqual(r.hallazgos.map(h => h.codigo).sort(), ["IDENTIFICACION_PACIENTE_AUSENTE", "MEDICAMENTO_SIN_NOMBRE", "PROFESIONAL_NO_IDENTIFICADO"].sort());
+  assert.deepEqual(d, original);
+});
+
+test("suficiencia: ambigüedad y contexto faltante derivan a auditoría con confianza alta", async () => {
+  const r = await evaluarSuficiencia(datos(), [], { modelo: "prueba", generar: async () => ({ text: JSON.stringify({ observaciones: [
+    { ruta: "/medicamentos/0/nombre", codigo: "MEDICAMENTO_AMBIGUO" },
+    { ruta: "/contexto_paciente/peso", codigo: "CONTEXTO_PACIENTE_INSUFICIENTE" },
+  ] }) }) });
+  let llamadas = 0;
+  const decision = await decidirEnrutamiento(datos(), calcularConfianza(datos(), evaluacion()), { modelo: "prueba", generar: async () => { llamadas++; return {}; } }, r);
+  assert.equal(llamadas, 0);
+  assert.equal(decision.prioridad_urgencia.estado, "omitida");
+  assert.equal(decision.decision_enrutamiento.requiere_auditoria_humana, true);
+  assert.match(decision.decision_enrutamiento.justificacion_enrutamiento, /medicamentos\/0\/nombre/);
+  const html = renderToStaticMarkup(createElement(VistaResultado, { resultado: { ok: true, body: {}, extraccion: { ok: true, body: { suficiencia_clinica: r, ...decision } } } }));
+  assert.match(html, /Suficiencia clínica y ambigüedades/);
+  assert.match(html, /no identificable/);
+  assert.match(html, /peso/);
+});
+
+test("suficiencia: fallo o respuesta inválida nunca aprueba y no filtra contenido", async () => {
+  for (const salida of ["{SECRETO", '{"observaciones":[{"ruta":"/SECRETO","codigo":"MEDICAMENTO_AMBIGUO"}]}', '{"observaciones":[{"ruta":"/paciente","codigo":"INVENTADO"}]}', new Error("SECRETO")]) {
+    const r = await evaluarSuficiencia(datos(), [], { modelo: "prueba", generar: async () => { if (salida instanceof Error) throw salida; return { text: salida }; } });
+    assert.equal(r.estado, "no_evaluable"); assert.equal(r.requiere_revision_humana, true);
+    assert.doesNotMatch(JSON.stringify(r), /SECRETO|INVENTADO/);
+  }
+});
+
+test("suficiencia: no exige pauta en antecedentes ni certifica un medicamento sin catálogo", async () => {
+  const d = datos(); d.medicamentos[0].estado = "Suspendido"; d.medicamentos[0].dosis = null; d.medicamentos[0].frecuencia = null;
+  const r = await evaluarSuficiencia(d, [], { modelo: "prueba", generar: async () => ({ text: '{"observaciones":[]}' }) }, "HISTORIA_CLINICA");
+  assert.equal(r.estado, "sin_hallazgos");
+  assert.equal(r.certifica_correccion_medica, false);
+  assert.equal(r.catalogo_farmacologico, "no_disponible");
+});
+
+test("suficiencia: etiquetas numeradas generan hallazgo local específico sin duplicar ambigüedad", async () => {
+  for (const nombre of ["Medicamento 1", "Medicamento 2", " MEDICAMENTO   12 ", "Medicamento #3", "Medicamento N.º 4"]) {
+    const d = datos(); d.medicamentos[0].nombre = nombre;
+    const r = await evaluarSuficiencia(d, [], { modelo: "prueba", generar: async () => ({ text: JSON.stringify({ observaciones: [
+      { ruta: "/medicamentos/0/nombre", codigo: "MEDICAMENTO_AMBIGUO" },
+      { ruta: "/medicamentos/0/via", codigo: "PAUTA_INCOMPLETA" },
+    ] }) }) });
+    const h = r.hallazgos.filter(h => h.ruta === "/medicamentos/0/nombre");
+    assert.equal(h.length, 1);
+    assert.equal(h[0].codigo, "MEDICAMENTO_ETIQUETA_GENERICA");
+    assert.equal(h[0].origen, "regla");
+    assert.ok(h[0].mensaje.includes(`“${nombre.trim().replace(/\s+/g, " ")}”`));
+    assert.equal(r.hallazgos.length, 2);
+    assert.equal(r.requiere_revision_humana, true);
+    assert.equal(d.medicamentos[0].nombre, nombre);
+    const decision = await decidirEnrutamiento(d, calcularConfianza(d, evaluacion(d)), { modelo: "prueba", generar: async () => { throw new Error("No evaluar prioridad"); } }, r);
+    assert.match(decision.decision_enrutamiento.justificacion_enrutamiento, /etiqueta genérica/);
+  }
+});
+
+test("suficiencia: etiqueta detectada aunque Gemini no observe nada o falle; no confunde nombres con dosis", async () => {
+  const d = datos(); d.medicamentos[0].nombre = "Medicamento 1";
+  for (const falla of [false, true]) {
+    const r = await evaluarSuficiencia(d, [], { modelo: "prueba", generar: async () => { if (falla) throw new Error("SECRETO"); return { text: '{"observaciones":[]}' }; } });
+    assert.equal(r.hallazgos[0].codigo, "MEDICAMENTO_ETIQUETA_GENERICA");
+    assert.equal(r.requiere_revision_humana, true);
+    assert.doesNotMatch(JSON.stringify(r), /SECRETO/);
+  }
+  for (const nombre of ["Paracetamol 500 mg", "Vitamina B12", "Medicamento 1 mg", "Medicamento 1 adicional"]) {
+    d.medicamentos[0].nombre = nombre;
+    const r = await evaluarSuficiencia(d, [], { modelo: "prueba", generar: async () => ({ text: '{"observaciones":[]}' }) });
+    assert.equal(r.hallazgos.some(h => h.codigo === "MEDICAMENTO_ETIQUETA_GENERICA"), false);
+  }
+});

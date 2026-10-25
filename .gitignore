@@ -6,3 +6,5 @@ node_modules
 *.key
 *.tsbuildinfo
 .oci/
+tmp/
+output/

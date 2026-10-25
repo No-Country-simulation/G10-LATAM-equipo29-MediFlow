@@ -1,3 +1,4 @@
+import type { CategoriaDocumento } from "./clasificacion";
 import { recibirDocumento } from "./recepcion";
 import { clasificarOriginal, extraerOriginal } from "./etapas-documento";
 import { BUCKET_DOCUMENTOS, leerDocumentoRecibido } from "./storage";
@@ -67,7 +68,7 @@ export async function procesarFlujo(request: Request, publicar: (evento: EventoF
       return await terminar();
     }
     emitir("extraccion");
-    const extraccion = await deps.extraer(documento);
+    const extraccion = await deps.extraer({ ...documento, categoria: resultado.clasificacion!.categoria as CategoriaDocumento });
     resultado.extraccion = await extraccion.json();
     if (!extraccion.ok) { ruta = fallo(extraccion.status); return await terminar(); }
     const decision = resultado.extraccion!.decision_enrutamiento as { destino_principal: string; requiere_auditoria_humana: boolean };

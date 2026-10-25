@@ -1,3 +1,5 @@
+import type { SuficienciaClinica } from "./suficiencia-clinica";
+import { observacionesConfianza } from "./observaciones-confianza";
 import { z } from "zod";
 import type { ConexionGemini } from "./clasificacion";
 import { UMBRAL_CONFIANZA, type ConfianzaDocumento } from "./confianza-extraccion";
@@ -28,7 +30,7 @@ No selecciones área ni reclasifiques: la cola se asignará después usando la c
 
 Es una propuesta para revisión operativa, no una decisión médica definitiva.`;
 
-export async function decidirEnrutamiento(datos: DatosClinicos, confianza: ConfianzaDocumento, conexion: ConexionGemini) {
+export async function decidirEnrutamiento(datos: DatosClinicos, confianza: ConfianzaDocumento, conexion: ConexionGemini, suficiencia?: SuficienciaClinica) {
   const suficiente = confianza.estado === "evaluado" && confianza.score !== null &&
     Number.isFinite(confianza.score) && confianza.score >= UMBRAL_CONFIANZA && confianza.score <= 1 &&
     !confianza.requiere_revision_humana && confianza.motivos.length === 0 && confianza.campos_observados.length === 0;
@@ -39,7 +41,10 @@ export async function decidirEnrutamiento(datos: DatosClinicos, confianza: Confi
     decision_enrutamiento: { destino_principal: "Cola_Auditoria_Humana", requiere_auditoria_humana: true,
       justificacion_enrutamiento: motivo, notificacion_generada: null, estado: "pendiente_entrega" as const },
   });
-  if (!suficiente) return revision("omitida", "Confianza insuficiente, no evaluable o con observaciones pendientes; requiere revisión humana.");
+  if (!suficiente) return revision("omitida", confianza.diagnostico && confianza.score === null
+    ? `No se pudo calcular el score de confianza. ${confianza.diagnostico.mensaje} Se requiere revisión humana; esto no demuestra que los datos extraídos sean incorrectos.`
+    : `Prioridad no evaluada; se requiere revisión humana. ${observacionesConfianza(confianza).slice(0, 3).join(" ") || "Confianza no evaluable o con observaciones pendientes."}${observacionesConfianza(confianza).length > 3 ? " Consulte las observaciones restantes en Calidad y revisión." : ""}`);
+  if (suficiencia?.requiere_revision_humana) return revision("omitida", `Revisión de suficiencia clínica requerida. ${suficiencia.hallazgos.slice(0, 3).map(h => `${h.ruta}: ${h.mensaje}`).join(" ")}${suficiencia.hallazgos.length > 3 ? " Consulte todos los hallazgos en Calidad y revisión." : ""}`);
   let prioridad: z.infer<typeof PrioridadSchema>;
   try {
     const respuesta = await conexion.generar({ model: conexion.modelo,

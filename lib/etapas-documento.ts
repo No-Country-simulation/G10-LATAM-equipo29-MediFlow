@@ -1,8 +1,8 @@
-import { clasificarDocumento, ErrorClasificacion, type EntradaClasificacion } from "./clasificacion";
+import { clasificarDocumento, ErrorClasificacion, type CategoriaDocumento, type EntradaClasificacion } from "./clasificacion";
 import { extraerDocumento, ErrorExtraccion } from "./extraccion";
 import { revisionPorValidacion } from "./decision-enrutamiento";
 
-export type DocumentoProcesable = EntradaClasificacion & { documento_id: string };
+export type DocumentoProcesable = EntradaClasificacion & { documento_id: string; categoria?: CategoriaDocumento };
 
 /** Etapas internas del servidor: reciben los bytes del original leído desde OCI. */
 export async function clasificarOriginal(documento: DocumentoProcesable): Promise<Response> {
@@ -18,7 +18,7 @@ export async function clasificarOriginal(documento: DocumentoProcesable): Promis
 
 export async function extraerOriginal(documento: DocumentoProcesable): Promise<Response> {
   try {
-    const extraccion = await extraerDocumento(documento);
+    const extraccion = await extraerDocumento(documento, undefined, documento.categoria);
     return Response.json({ status: "extraido", documento_id: documento.documento_id,
       ...extraccion, extraido_en: new Date().toISOString() });
   } catch (error) {
