@@ -134,6 +134,7 @@ export default function Pagina() {
             <Logo />
             MediFlow
           </span>
+          <a className="portada__admin" href="/admin">Panel de administración <span aria-hidden="true">↗</span></a>
         </header>
 
         <div className="portada__contenido">

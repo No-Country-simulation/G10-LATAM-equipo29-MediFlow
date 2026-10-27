@@ -815,3 +815,50 @@ body {
   .detalle-documento { margin-top: 6rem; }
   .detalle-navegacion button { flex: 1 1 140px; }
 }
+
+.portada__barra { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.portada__admin { color: var(--marfil); text-decoration: none; border: 1px solid #56817f; border-radius: 10px; padding: .65rem 1rem; font-size: .88rem; }
+.portada__admin:hover { background: #ffffff12; }
+.admin { max-width: 1440px; margin: auto; padding: 1.5rem clamp(1rem, 4vw, 3rem) 4rem; }
+.admin-barra, .admin-titulo, .admin-herramientas, .admin-paginacion { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.admin-barra { padding-bottom: 1.5rem; border-bottom: 1px solid var(--linea); }
+.admin a { color: var(--teal); }
+.admin-titulo { padding: 2rem 0 1rem; }
+.admin-titulo h1 { font-family: var(--f-titulo); font-size: clamp(1.8rem, 3vw, 2.6rem); margin: .25rem 0; }
+.admin-titulo p { margin: .4rem 0; color: var(--tinta-suave); }
+.admin-eyebrow { letter-spacing: .13em; font-size: .75rem; font-weight: 700; }
+.admin-insignia { padding: .5rem .9rem; background: #d6ebe5; color: #145e50; border-radius: 30px; font-size: .85rem; }
+.admin-aviso { border-left: 3px solid #bc9246; padding: .7rem 1rem; background: #fff6e3; font-size: .85rem; margin-bottom: 1.5rem; }
+.admin-vistas { display: flex; gap: .6rem; margin-bottom: 1.25rem; }
+.admin button { cursor: pointer; font-family: inherit; }
+.admin-vistas button, .admin-paginacion button { padding: .7rem 1rem; border: 1px solid var(--linea); border-radius: 10px; background: var(--hoja); color: var(--tinta); }
+.admin-vistas button[aria-pressed="true"] { background: var(--tinta); color: white; }
+.admin button:disabled { opacity: .45; cursor: default; }
+.admin-mesa { display: grid; grid-template-columns: 230px minmax(0,1fr); gap: 1.5rem; }
+.admin-carpetas, .admin-listado, .admin-detalle { background: var(--hoja); border: 1px solid var(--linea); border-radius: 16px; padding: 1.25rem; min-width: 0; }
+.admin-carpetas h2 { font-size: .9rem; margin: 0 0 1rem; }
+.admin-carpetas > button { display: block; width: 100%; text-align: left; border: 0; background: transparent; border-radius: 8px; padding: .8rem; color: var(--tinta); }
+.admin-carpetas > button[aria-current] { background: #e0f0eb; color: #126a58; font-weight: 700; }
+.admin-carpetas p { overflow-wrap: anywhere; font-size: .75rem; color: var(--tinta-suave); margin-top: 2rem; }
+.admin-herramientas label { display: grid; gap: .35rem; font-size: .8rem; flex: 1; }
+.admin-herramientas input { padding: .75rem; border: 1px solid var(--linea); border-radius: 9px; font: inherit; min-width: 0; }
+.admin-migas { margin: 1.2rem 0; overflow-wrap: anywhere; font-size: .8rem; }
+.admin-migas button, .admin-enlace { border: 0; background: transparent; color: var(--teal); padding: 0; text-align: left; font-size: inherit; overflow-wrap: anywhere; }
+.admin-tabla { overflow-x: auto; }
+.admin-tabla table { width: 100%; border-collapse: collapse; text-align: left; font-size: .85rem; }
+.admin-tabla td, .admin-tabla th { padding: 1rem .6rem; border-bottom: 1px solid var(--linea); }
+.admin-tabla th { color: var(--tinta-suave); font-size: .75rem; }
+.admin-tabla small { display: block; color: var(--tinta-suave); overflow-wrap: anywhere; max-width: 380px; margin-top: .3rem; }
+.admin-paginacion { margin-top: 1.5rem; font-size: .8rem; }
+.admin-detalle h2, .admin-ruta { overflow-wrap: anywhere; }
+.admin-preview { width: 100%; height: 70vh; border: 1px solid var(--linea); }
+.admin-imagen { max-width: 100%; max-height: 80vh; object-fit: contain; }
+.admin-detalle .dato { grid-template-columns: minmax(8rem, .3fr) minmax(0, 1fr); }
+.admin-detalle .dato dd { display: block; }
+@media (max-width: 800px) { .admin-mesa { grid-template-columns: minmax(0,1fr); } .admin-carpetas > button { display: inline-block; width: auto; } .admin-carpetas p { margin-top: .7rem; } .admin-detalle .dato { grid-template-columns: minmax(0,1fr); } }
+.login { max-width: 650px; }
+.login-tarjeta { margin-top: 2rem; }
+.login-formulario { display: grid; gap: 1.2rem; margin: 1.5rem 0; }
+.login-formulario label { display: grid; gap: .5rem; }
+.login-formulario input { width: 100%; box-sizing: border-box; padding: .85rem; border: 1px solid var(--linea); border-radius: 9px; font: inherit; }
+.admin-sesion { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 1rem; padding: 1rem 3%; background: var(--hoja); }

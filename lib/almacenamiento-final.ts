@@ -1,3 +1,4 @@
+import type { ObjectStorageClient } from "oci-objectstorage";
 import { NoRetryConfigurationDetails } from "oci-common";
 import { DOC_ID_PATTERN } from "./types";
 import { BUCKET_DOCUMENTOS, ErrorAlmacenamiento, obtenerConexionOci } from "./storage";
@@ -5,7 +6,7 @@ import type { AlmacenamientoOci, JsonFlujo, RutaFinal } from "./resultado-flujo"
 
 const RUTAS: RutaFinal[] = ["procesados/normales", "procesados/urgentes", "auditoria_humana", "rechazados", "errores"];
 export async function guardarResultadoFinal(id: string, ruta: RutaFinal, resultado: JsonFlujo,
-  conectar = obtenerConexionOci): Promise<JsonFlujo & { almacenamiento_oci: AlmacenamientoOci }> {
+  conectar: () => { cliente: Pick<ObjectStorageClient, "putObject">; namespace: string } = obtenerConexionOci): Promise<JsonFlujo & { almacenamiento_oci: AlmacenamientoOci }> {
   if (!DOC_ID_PATTERN.test(id) || !RUTAS.includes(ruta)) throw new Error("Ruta de resultado inválida");
   const ubicacion = { bucket: BUCKET_DOCUMENTOS, ruta_objeto: `${ruta}/${id}.json` };
   // El objeto incluye su ubicación; solo se confirma éxito al cliente después del PUT.

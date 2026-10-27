@@ -577,3 +577,79 @@ con la etiqueta detectada, conservando el dato original. No usa coincidencias
 parciales ni considera genérico un nombre solo por incluir números o dosis.
 El hallazgo persiste aunque Gemini no lo reporte o falle; una observación
 `MEDICAMENTO_AMBIGUO` para el mismo campo no se duplica. Otros hallazgos se conservan.
+
+
+## Panel de administración OCI
+
+Acceso desde la barra superior de la página principal o `/admin`.
+La primera versión es de consulta: bandeja de resultados por estado, explorador
+de carpetas del bucket, navegación paginada (50 objetos), filtro de ID/nombre en
+la página cargada, vista estructurada de resultados, JSON original, previsualización
+de PDF/imágenes y descarga. Los resultados con ruta del original permiten abrirlo.
+Los originales y metadatos también están disponibles desde `recibidos/`.
+No incluye eliminar, mover, editar, reprocesar ni resolver auditorías.
+
+`GET /api/admin/objetos` admite prefijo, inicio de página y modo recursivo.
+`GET /api/admin/archivo` lee el objeto indicado por ruta; `descargar=1` fuerza descarga.
+El bucket es fijo (`mediflow-documentos-clinicos`) y no se aceptan credenciales,
+URLs ni nombres de otros buckets desde el navegador. Las respuestas no se cachean.
+Los archivos tienen un límite de 20 MiB, también comprobado durante la lectura.
+El filtro es local a la página cargada, no una búsqueda global del contenido clínico.
+La bandeja trabaja con resultados almacenados, no representa una cola ejecutable.
+
+El panel y sus APIs requieren una cuenta de Supabase Auth con
+`app_metadata.rol = "administrador"` y `app_metadata.activo = true`.
+La página principal y las APIs de carga/procesamiento permanecen públicas.
+Los permisos actuales son los de la identidad OCI del servidor: necesita
+OBJECT_INSPECT para listar y OBJECT_READ para consultar objetos del bucket.
+Esta implementación no cambia las políticas IAM ni concede permisos en OCI.
+Las credenciales permanecen en el servidor; no se crean enlaces públicos ni PAR.
+Errores de configuración o permisos se muestran sin respuestas crudas del SDK.
+
+### Configurar inicio de sesión con Supabase
+
+1. Crear un proyecto Supabase. En Authentication, desactivar **Allow new users
+   to sign up**, acceso anónimo y proveedores sociales que no se utilicen.
+   Ocultar el formulario de registro no reemplaza desactivar altas en Supabase.
+2. Copiar la URL del proyecto y su clave **publishable** (o `anon`) a
+   `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` en `.env.local` y en las variables
+   del despliegue. No utilizar `service_role` ni claves secretas. Reiniciar Next.
+3. En Authentication > Users, crear la cuenta con correo y contraseña mediante
+   la opción de creación manual (no invitación). Para la demostración, confirmar
+   el correo desde la administración. No publicar la contraseña ni subirla al repo.
+4. Autorizar ese usuario desde el SQL Editor administrativo, sustituyendo el UUID
+   por el identificador exacto mostrado en Authentication > Users:
+
+```sql
+update auth.users
+set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb)
+  || '{"rol":"administrador","activo":true}'::jsonb
+where id = 'UUID-DEL-USUARIO'::uuid;
+```
+
+Verificar que se actualizó exactamente una fila. Estos permisos no deben ponerse
+en `user_metadata`, porque el usuario puede modificar esos metadatos.
+Para retirar acceso al panel, cambiar `activo` a `false` mediante el mismo
+procedimiento. El servidor consulta `getUser()` en cada petición administrativa
+para comprobar los metadatos vigentes; una cuenta autenticada sin permiso recibe 403.
+
+El botón superior dirige a `/admin`, que solicita login en `/login` si corresponde.
+El formulario solo admite correo/contraseña; no existe alta pública en MediFlow.
+Las contraseñas se gestionan en Supabase Auth, no en tablas ni archivos propios.
+La aplicación usa cookies HttpOnly, SameSite=Lax y Secure en producción: desplegar
+con HTTPS. No hay cliente Supabase en el navegador ni tokens en localStorage.
+`proxy.ts` renueva cookies solo en login y rutas administrativas; los controles
+de autorización también están en el layout y en cada API, antes de consultar OCI.
+Las respuestas administrativas no se cachean. Sin configuración el acceso falla
+cerrado (503 en APIs) y la ingesta sigue funcionando.
+
+La duración/renovación de las sesiones y los límites de Auth se gestionan en
+Supabase; no se impone un vencimiento propio de una hora. Cerrar sesión afecta
+a la sesión de ese navegador. No se incluyen recuperación de contraseña por correo
+ni pantallas de gestión de usuarios en esta versión; se gestionan desde Supabase.
+
+Comprobación manual tras configurar el proyecto: entrar sin sesión a `/admin`,
+verificar que ambas APIs administrativas rechacen la consulta, iniciar sesión
+con la cuenta autorizada, listar/abrir/descargar un documento, cerrar sesión,
+comprobar nuevamente el rechazo y repetir con una cuenta sin rol o deshabilitada.
+Verificar además que la carga pública funciona sin cookies de sesión.

@@ -26,7 +26,7 @@ type ClienteEscritura = Pick<
 
 type ClienteLectura = Pick<ObjectStorageClient, "getObject">;
 
-type ClienteStorage = ClienteEscritura & ClienteLectura;
+type ClienteStorage = ClienteEscritura & ClienteLectura & Pick<ObjectStorageClient, "listObjects">;
 
 type Conexion<Cliente = ClienteStorage> = {
   cliente: Cliente;
