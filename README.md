@@ -1,217 +1,117 @@
-# MediFlow — Servicio de Ingesta (Next.js, listo para Vercel)
+# MediFlow
 
-Cubre el requisito del MVP del hackathon:
+Agente de triaje y extracción de documentos clínicos. Recibe un PDF, una imagen o un texto, lo clasifica con IA, extrae sus datos clínicos en un JSON estructurado y lo envía a la cola que corresponde. Los casos dudosos o urgentes no se resuelven solos: pasan a revisión humana.
 
-> "1. Ingerir el documento clínico en los formatos soportados (PDF / Imagen / JSON)"
+Proyecto del Hackathon ONE, grupo 10 (Oracle Next Education y Alura). Aplicación Next.js lista para desplegar en Vercel, con almacenamiento en OCI Object Storage y modelos Gemini.
 
-Recepción y **validación estricta** de documentos clínicos antes de que
-entren al grafo de decisión (clasificación → extracción → enrutamiento).
-Formatos aceptados: **PDF, IMAGEN (jpg/png/webp) y JSON/TEXTO**.
-PDF e imágenes admiten hasta **14 MiB (14 680 064 bytes)**, tanto en recepción como
-en procesamiento. TIFF se rechaza en recepción, antes de guardar el original en OCI.
-Cualquier otro formato se rechaza con `415`, incluso si el nombre del
-archivo o el `Content-Type` intentan simular uno soportado (ver
-`lib/validators.ts`).
+> **Aviso.** MediFlow es un prototipo de hackathon. No es un dispositivo médico, no valida diagnósticos ni tratamientos y su prioridad de urgencia no es un triaje clínico. Los documentos se envían a la API de Gemini: usar solo documentos sintéticos hasta definir las condiciones de privacidad para datos reales de pacientes.
 
-## Por qué Next.js y no FastAPI + Streamlit
+## Contenido
 
-Vercel ejecuta **funciones serverless**: cada request instancia (y luego
-destruye) el proceso. Streamlit necesita un proceso persistente con
-WebSockets abierto, lo que **no es compatible con Vercel**. Next.js con
-App Router sí es 100% nativo de Vercel: los _Route Handlers_ usan la Web
-API `Request`/`Response` estándar y `request.formData()` para manejar
-`multipart/form-data` sin librerías adicionales (`formidable`, `busboy`,
-etc.).
+- [Qué hace](#qué-hace)
+- [Cómo funciona el flujo](#cómo-funciona-el-flujo)
+- [Inicio rápido](#inicio-rápido)
+- [Variables de entorno](#variables-de-entorno)
+- [API](#api)
+- [Reglas del flujo](#reglas-del-flujo)
+- [Almacenamiento en OCI](#almacenamiento-en-oci)
+- [Panel de administración](#panel-de-administración)
+- [Estructura del proyecto](#estructura-del-proyecto)
+- [Pruebas](#pruebas)
+- [Despliegue en Vercel](#despliegue-en-vercel)
+- [Limitaciones conocidas](#limitaciones-conocidas)
 
-## Estructura
+## Qué hace
 
-```
-app/
-  page.tsx                    → pantalla de envío (React)
-  api/ingest/file/route.ts    → POST — sube PDF, IMAGEN o JSON (multipart/form-data)
-  api/ingest/json/route.ts    → POST — envía JSON/texto (application/json)
-  api/ingest/salud/route.ts   → GET  — healthcheck
-  api/ingest/classify/route.ts → POST — clasifica un documento ya ingerido (Gemini)
-  api/ingest/extract/route.ts  → POST — extrae y valida entidades clínicas (Gemini)
-lib/
-  types.ts                    → enums, esquema Zod, contrato ResultadoIngesta
-  validators.ts                → validación en 3 capas (extensión + MIME + firma binaria)
-  storage.ts                    → persistencia real con el SDK de OCI Object Storage
-  clasificacion.ts              → clasificación multimodal con Gemini (categorías, prompt, validación)
-  extraccion.ts                → prompt, esquema clínico y reglas de consistencia documental
+- **Recibe** PDF, imágenes (JPG, PNG, WEBP), JSON y texto plano, con validación estricta del formato real del archivo.
+- **Clasifica** cada documento en una de 10 categorías (receta, resultado de laboratorio, informe de imagenología, historia clínica, etc.) con Gemini.
+- **Extrae** los datos clínicos a un contrato JSON único: paciente, profesionales, diagnósticos, medicamentos, estudios, laboratorio, signos vitales, indicaciones e institución.
+- **Valida** la estructura localmente, calcula un puntaje de confianza de la extracción y revisa la suficiencia clínica de los datos.
+- **Propone una prioridad** (urgente o normal) y **enruta** el documento a una cola según su categoría.
+- **Guarda** el original intacto y un JSON consolidado con todo el recorrido en OCI Object Storage.
+- **Muestra** el avance por etapas y el resultado en una interfaz web, y ofrece un panel protegido para consultar lo almacenado.
+
+## Cómo funciona el flujo
+
+La interfaz envía una sola solicitud a `POST /api/process`. El servidor coordina todas las etapas y devuelve el avance como NDJSON, una línea por evento.
+
+```text
+Documento ─► Recepción ─► Clasificación ─► Extracción ─► Validación ─► Confianza ─► Suficiencia ─► Prioridad ─► Enrutamiento ─► Guardado en OCI
 ```
 
-## Ejecutar localmente
+| Etapa | Qué ocurre | Si falla o hay dudas |
+| --- | --- | --- |
+| Recepción | Valida extensión, tipo MIME y firma binaria. Guarda el original y sus metadatos en OCI. | Formato no soportado: `415`. Se guarda el reporte, no el archivo inválido. |
+| Clasificación | Gemini asigna una categoría y una confianza. | Confianza menor al umbral o categoría `OTRO`: pasa a auditoría humana sin extraer. |
+| Extracción | Gemini devuelve el JSON clínico. | Un fallo del proveedor termina en `errores/`. |
+| Validación | Zod y JSON Schema (Ajv) comprueban claves, tipos y ausencia de campos extra. | JSON inválido: pasa a auditoría humana. |
+| Confianza | Gemini coteja el original con lo extraído y el servidor calcula el puntaje. | Puntaje menor a 0.85 o evaluación no disponible: auditoría humana. |
+| Suficiencia | Reglas locales y una revisión de Gemini buscan datos faltantes o ambiguos. | Cualquier hallazgo: auditoría humana. |
+| Prioridad | Gemini propone `URGENTE`, `NORMAL` o `NO_DETERMINADA`. | Indeterminada o contradictoria: auditoría humana. |
+| Enrutamiento | Si la prioridad es normal, asigna la cola según la categoría. | Un fallo se informa y conserva los datos extraídos. |
+| Guardado | Escribe el JSON consolidado en el prefijo que corresponde al resultado. | Se informa `exito`, `error` o `no_confirmado`. |
+
+Por documento se hacen hasta cinco llamadas a Gemini (clasificación, extracción, confianza, suficiencia y prioridad), lo que añade latencia y consumo de cuota.
+
+## Inicio rápido
+
+**Requisitos**
+
+- Node.js 20.9 o superior
+- Un bucket privado en OCI llamado `mediflow-documentos-clinicos` (la aplicación no crea buckets ni políticas IAM)
+- Una clave de [Google AI Studio](https://aistudio.google.com/apikey) para Gemini
+- Opcional: un proyecto de Supabase, solo para el panel de administración
+
+**Instalación**
 
 ```bash
 npm install
-# Copiar .env.example a .env.local y configurar OCI y GEMINI_API_KEY.
-npm run dev
-# abre http://localhost:3000
+cp .env.example .env.local   # completar las variables (ver la tabla siguiente)
+npm run dev                  # http://localhost:3000
 ```
 
-## Desplegar en Vercel
+Reiniciar `npm run dev` después de cambiar `.env.local`. La compilación no necesita credenciales: la configuración se carga en el servidor, bajo demanda.
 
-```bash
-npm i -g vercel   # si no lo tenés
-vercel             # sigue el flujo interactivo (o conecta el repo desde vercel.com)
-```
+## Variables de entorno
 
-Configurar las variables de `.env.example` como variables del servidor en
-Vercel. No usar el prefijo `NEXT_PUBLIC_`. OCI está activo: se requieren credenciales para conservar el original y el JSON final.
+Todas son del servidor. No usar el prefijo `NEXT_PUBLIC_` en ninguna. `.env.local`, los archivos PEM y las claves están excluidos de Git.
 
-## Configurar OCI Object Storage
+| Variable | Obligatoria | Descripción |
+| --- | --- | --- |
+| `OCI_REGION` | Sí | Región del bucket, por ejemplo `us-phoenix-1`. |
+| `OCI_NAMESPACE` | Sí | Namespace de Object Storage de la tenencia. |
+| `OCI_AUTH_MODE` | Sí | `api_key` (local o despliegue) o `config_file` (solo local). |
+| `OCI_TENANCY_OCID`, `OCI_USER_OCID`, `OCI_FINGERPRINT`, `OCI_PRIVATE_KEY` | Con `api_key` | Credenciales de la API Key. La clave es el PEM completo y admite saltos de línea reales o secuencias `\n`. |
+| `OCI_PRIVATE_KEY_PASSPHRASE` | No | Contraseña de la clave privada. |
+| `OCI_CONFIG_FILE`, `OCI_CONFIG_PROFILE` | Con `config_file` | Ruta del archivo (por defecto `~/.oci/config`) y perfil (por defecto `DEFAULT`). |
+| `GEMINI_API_KEY` | Sí | Clave de Gemini. Sin ella, las etapas de IA responden `503`. |
+| `GEMINI_MODEL` | No | Por defecto `gemini-3.5-flash-lite`. |
+| `UMBRAL_CLASIFICACION` | No | De 0 a 1. Por defecto `0.85`. Una confianza menor deriva el documento a auditoría. |
+| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` | Para el panel | URL del proyecto y clave publicable (o `anon`). Nunca `service_role` ni claves secretas. |
 
-Requiere Node.js >=20.9.0 y un bucket privado existente llamado
-`mediflow-documentos-clinicos`. Esta integración no crea buckets ni políticas IAM.
+El usuario de OCI necesita permiso para crear objetos en el bucket y para eliminarlos (se usa para revertir los metadatos cuando se rechaza una carga). Para el panel de administración también necesita permiso de listar y leer objetos. Conviene limitar las políticas al bucket y al compartimento.
 
-1. Copiar `.env.example` a `.env.local`, si todavía no existe.
-2. Completar `OCI_REGION` y `OCI_NAMESPACE`.
-3. Elegir autenticación:
-   - `OCI_AUTH_MODE=api_key`: completar `OCI_TENANCY_OCID`, `OCI_USER_OCID`,
-     `OCI_FINGERPRINT` y `OCI_PRIVATE_KEY` (PEM completo). La clave pública
-     correspondiente debe estar registrada como API Key del usuario OCI.
-     `OCI_PRIVATE_KEY_PASSPHRASE` es opcional. La clave admite saltos reales
-     entre comillas o secuencias literales `\n`.
-   - `OCI_AUTH_MODE=config_file`: usar el archivo local `~/.oci/config`, o
-     `OCI_CONFIG_FILE` para otra ruta; `OCI_CONFIG_PROFILE` selecciona el perfil
-     (por defecto `DEFAULT`). En este modo no se requieren variables de API key.
-4. El usuario OCI debe tener permisos de creación de objetos en ese bucket y
-   eliminación para revertir metadatos cuando una carga es rechazada. Limitar
-   las políticas al bucket y compartimento correspondientes.
-5. Reiniciar `npm run dev` después de cambiar la configuración.
+## API
 
-`.env.local`, archivos PEM y claves están excluidos de Git. Nunca pegar claves
-privadas en el código, README ni respuestas de la API. La configuración se carga
-en el servidor, bajo demanda; la compilación no necesita credenciales.
+La recepción y el procesamiento son públicos. Solo el panel de administración exige sesión.
 
-## Organización de originales recibidos
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| `POST` | `/api/process` | **Flujo completo.** Acepta un archivo (`multipart/form-data`) o JSON/texto, emite avances NDJSON y guarda el resultado terminal en OCI. Es el endpoint que usa la interfaz. |
+| `POST` | `/api/ingest/file` | Recepción de un archivo. `multipart/form-data` con `archivo` y `canal_origen` (opcional). |
+| `POST` | `/api/ingest/json` | Recepción de JSON o texto: `{ tipo_archivo, documento_texto, canal_origen? }`. |
+| `POST` | `/api/ingest/classify` | Clasifica el contenido enviado, sin pasar por OCI. |
+| `POST` | `/api/ingest/extract` | Extrae y valida el contenido enviado, sin pasar por OCI. |
+| `POST` | `/api/ingest/route` | Asigna la cola de la ruta normal: `{ documento_id, categoria }`. |
+| `GET` | `/api/ingest/salud` | Comprobación de que la aplicación responde. No consulta OCI ni Gemini. |
+| `GET` | `/api/admin/objetos` | Lista objetos del bucket (requiere sesión de administrador). |
+| `GET` | `/api/admin/archivo` | Lee o descarga un objeto (requiere sesión de administrador). |
 
-```text
-mediflow-documentos-clinicos/
-└── recibidos/2026/09/DOC-CLIN-2026-1U0FNJ/
-    ├── DOC-CLIN-2026-1U0FNJ.jpg
-    └── DOC-CLIN-2026-1U0FNJ.metadata.json
-```
+Los endpoints individuales sirven como herramientas independientes y no comprueban las etapas previas. Para obtener el recorrido completo y su persistencia, usar `/api/process`.
 
-Año y mes se toman de la fecha de recepción en UTC, no del identificador.
-El archivo binario conserva exactamente sus bytes; extensión y MIME se derivan
-de su firma validada (JPEG se normaliza a `.jpg`). El nombre
-original se guarda únicamente en los metadatos. Para JSON/texto se conserva
-el cuerpo JSON original de la petición, sin reformatearlo, como `<id>.json`.
-El ID generado para una petición JSON sin identificador queda en los metadatos
-y en la respuesta; no se modifica el original para insertarlo.
+**Canales de origen** (`canal_origen`, por defecto `Otro`): `Guardia_Emergencias`, `Consultorio_Externo`, `Laboratorio`, `Farmacia`, `Portal_Paciente` y `Otro`.
 
-`<documento_id>.metadata.json` utiliza la misma estructura para archivos y JSON/texto:
-`documento_id`, `canal_origen`, `tipo_archivo_detectado`, `tamano_bytes`,
-`recibido_en`, `nombre_original` y `almacenamiento_oci`, que contiene `bucket`
-y `ruta_objeto`. No incluye `content_type` ni `sha256`.
-
-### Almacenamiento activo por resultado del flujo
-
-En `/api/process`, después de clasificar y antes de extraer, se aplica la política
-de ambigüedad. Una categoría específica con confianza mayor o igual al umbral
-continúa. Una confianza inferior o categoría `OTRO` deriva a `auditoria_humana/`.
-El umbral inicial es 0.85, configurable mediante `UMBRAL_CLASIFICACION` (0 a 1);
-es independiente del score de confianza de extracción y requiere calibración con
-documentos revisados. Una configuración inválida o fallo del modelo es un error técnico.
-
-`clasificacion.evaluacion` registra `umbral`, `estado` y `motivos`. En una salida
-ambigua, los bloques raíz `decision_enrutamiento` y `prioridad_urgencia` registran
-la auditoría pendiente de entrega y prioridad `no_evaluada`, con `urgente: null`.
-No se ejecutan ni se inventan extracción, validación, confianza o enrutamiento normal.
-La revisión humana debe considerar la posible urgencia que aún no fue evaluada.
-Los endpoints de etapas individuales siguen siendo herramientas independientes;
-la política de interrupción pertenece al flujo completo `/api/process`.
-
-La interfaz envía una sola solicitud a `POST /api/process`. El servidor coordina
-recepción, clasificación, extracción, validación, confianza, prioridad, enrutamiento
-normal y guardado final. Envía avances como NDJSON para mantener el indicador de etapas.
-No acepta un JSON final calculado por el navegador ni una ruta de almacenamiento del cliente.
-
-Después de confirmar la recepción, el servidor lee el original desde OCI una sola vez,
-validando que la ruta corresponda al documento y respetando el límite de lectura.
-Clasificación, extracción y cotejo de confianza utilizan esos mismos bytes descargados.
-Si falla la lectura, el flujo termina por la ruta `errores/` y conserva el reporte
-si OCI permite escribirlo; no utiliza el archivo de la solicitud como alternativa.
-
-| Prefijo | Contenido |
-| --- | --- |
-| `recibidos/AAAA/MM/<id>/` | Original intacto y metadatos de recepción. |
-| `procesados/normales/<id>.json` | Resultado normal, incluyendo asignación de cola. |
-| `procesados/urgentes/<id>.json` | Resultado urgente y alerta preparada. |
-| `auditoria_humana/<id>.json` | Validación inválida, confianza insuficiente o prioridad no evaluable. |
-| `rechazados/<id>.json` | Rechazos de entrada/formato (errores HTTP 4xx, excepto 429). |
-| `errores/<id>.json` | Fallos técnicos, proveedor o enrutamiento; conserva etapas completadas. |
-
-Cada ejecución termina con un único JSON consolidado, con los bloques disponibles
-en orden: `ingesta`, `clasificacion`, `extraccion`, `enrutamiento`, `almacenamiento_oci`.
-Las etapas no ejecutadas no se inventan. No se guardan archivos separados de clasificación
-ni extracción. En un rechazo de entrada se conserva el reporte, no el binario inválido.
-Si JSON Schema falla, se conservan las inconsistencias y no se almacena la salida inválida del modelo.
-
-`almacenamiento_oci` contiene `bucket`, `ruta_objeto` y `status_backup`.
-El archivo final incluye su propia ubicación y es idéntico al JSON final mostrado.
-`exito` se devuelve solo después de confirmar el PUT; `error` indica fallo definitivo,
-y `no_confirmado` timeout o resultado incierto. Ante un fallo, la ubicación mostrada
-es la ruta intentada, no prueba de que exista el objeto. Si OCI no está disponible,
-no es posible guardar allí el reporte de ese mismo fallo; la interfaz lo informa.
-
-### Confirmación y duplicados
-
-La recepción confirma `201` tras guardar original y metadata. La validación compartida
-con clasificación y extracción no repite escrituras. Se mantiene la reserva de metadata
-con `If-None-Match: *`, protección del original y reversión condicionada por ETag ante
-rechazos definitivos. Un timeout puede dejar una reserva parcial y exige conciliación.
-El resultado final también usa `If-None-Match: *`; nunca sobrescribe un archivo existente.
-No hay reintentos automáticos de escrituras inciertas. Los IDs generados tienen seis
-caracteres alfanuméricos; una nueva carga normal genera otro ID.
-
-La desconexión de la interfaz no cancela voluntariamente el guardado en el servidor.
-No hay cola de trabajos duradera: un cierre del proceso o timeout del alojamiento puede
-interrumpirlo. `/api/process` declara un máximo de 300 segundos, sujeto a los límites
-reales del despliegue. `/api/ingest/salud` comprueba solo la aplicación.
-
-Los endpoints individuales siguen disponibles: recepción guarda el original;
-clasificación, extracción y enrutamiento devuelven su etapa. Para obtener persistencia
-terminal de cualquier rama debe utilizarse `/api/process`, como hace la interfaz.
-Los endpoints individuales de clasificación y extracción siguen aceptando contenido
-directo para uso independiente; la interfaz utiliza el original de OCI mediante `/api/process`.
-
-## Verificación
-
-```bash
-npm test
-npm run typecheck
-npm run build
-```
-
-Las pruebas automáticas simulan Gemini/OCI y verifican todas las rutas terminales,
-errores de escritura, preservación del original y el JSON consolidado.
-`npx tsx scripts/verificar-oci.ts` realiza una prueba real con un documento sintético:
-crea objetos en OCI y los vuelve a leer para comprobar original y resultado. No los elimina.
-
-## Límite importante de Vercel
-
-Las funciones serverless en el plan Hobby tienen un límite de **~4.5 MB**
-de body por request. Para estudios de imagen más pesados, la ruta
-recomendada es subir directo a OCI Object Storage desde el cliente con
-una URL prefirmada, y que esta API solo reciba la metadata — está fuera
-del alcance del MVP pero conviene tenerlo en cuenta para la demo.
-
-## Endpoints
-
-| Método | Ruta                   | Descripción                                                                                                                                                                         |
-| ------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/api/ingest/file`     | `multipart/form-data`: `archivo` (File), `canal_origen` (opcional)                                                                                                                  |
-| POST   | `/api/ingest/json`     | `application/json`: `{ tipo_archivo, documento_texto, canal_origen? }`                                                                                                              |
-| GET    | `/api/ingest/salud`    | Healthcheck                                                                                                                                                                         |
-| POST   | `/api/ingest/classify` | `multipart/form-data`: `documento_id`, `archivo`; o JSON: `documento_id`, `tipo_archivo`, `documento_texto` — clasifica directamente con Gemini, sin OCI |
-| POST   | `/api/ingest/extract` | `multipart/form-data`: `documento_id`, `archivo`, `canal_origen?`; o JSON: `documento_id`, `tipo_archivo`, `documento_texto`, `canal_origen?` — extrae el contenido enviado sin OCI |
-| POST   | `/api/ingest/route`    | `application/json`: `{ documento_id, categoria }` — asigna la cola por categoría exclusivamente para la ruta normal |
-| POST   | `/api/process` | Archivo multipart o JSON/texto; ejecuta el flujo completo, emite avances NDJSON y guarda el resultado terminal en OCI. |
-
-### Ejemplo de respuesta exitosa (`201`)
+**Ejemplo de recepción exitosa (`201`)**
 
 ```json
 {
@@ -230,7 +130,7 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 }
 ```
 
-### Ejemplo de rechazo (`415`)
+**Ejemplo de rechazo (`415`)**
 
 ```json
 {
@@ -240,385 +140,132 @@ del alcance del MVP pero conviene tenerlo en cuenta para la demo.
 }
 ```
 
-## Clasificación con Gemini
+**Errores frecuentes:** `400` o `422` entrada inválida; `413` documento demasiado grande; `415` formato no soportado; `502` fallo del proveedor externo; `503` configuración ausente o cuota agotada.
 
-`POST /api/ingest/classify` recibe `documento_id` y el contenido original por multipart o JSON,
-lo envía a Gemini (multimodal: PDF, imagen o texto/JSON) y devuelve la categoría,
-confianza de clasificación y justificación.
-El servidor lo ejecuta después de la ingesta y espera su éxito antes de extraer. Si falla, guarda el resultado parcial en la ruta terminal. La clasificación se muestra incluso si luego falla la extracción.
+## Reglas del flujo
 
-Configuración (solo servidor, nunca `NEXT_PUBLIC_`):
+### Formatos y límites
 
-| Variable         | Descripción                                                 |
-| ---------------- | ----------------------------------------------------------- |
-| `GEMINI_API_KEY` | Clave de Google AI Studio. Sin ella, la API devuelve `503`. |
-| `GEMINI_MODEL`   | Opcional. Por defecto `gemini-3.5-flash-lite`.              |
+- PDF e imágenes (JPG, PNG, WEBP): hasta **14 MiB** (14 680 064 bytes), tanto en recepción como en procesamiento.
+- JSON y texto: hasta **50 000 caracteres**. La extracción no trunca el texto.
+- **TIFF se rechaza** en recepción, antes de guardar nada en OCI, porque Gemini no lo admite. Convertir a PDF, PNG o JPEG.
+- Cualquier otro formato recibe `415`, aunque el nombre o el `Content-Type` intenten simular uno válido. La validación usa tres capas: extensión, MIME y firma binaria (`lib/validators.ts`).
 
-Categorías (`CATEGORIAS_DOCUMENTO` en `lib/clasificacion.ts`; para agregar o
-cambiar una basta editar ese arreglo y su descripción, el prompt se genera de ahí):
-`RECETA_MEDICA`, `RESULTADO_LABORATORIO`, `INFORME_IMAGENOLOGIA`,
-`HISTORIA_CLINICA`, `RESUMEN_ALTA`, `ORDEN_MEDICA`, `CERTIFICADO_MEDICO`,
-`CONSENTIMIENTO_INFORMADO`, `DOCUMENTO_ADMINISTRATIVO` y `OTRO`.
+### Clasificación
 
-Ejemplo de respuesta (`200`):
+Categorías (`CATEGORIAS_DOCUMENTO` en `lib/clasificacion.ts`): `RECETA_MEDICA`, `RESULTADO_LABORATORIO`, `INFORME_IMAGENOLOGIA`, `HISTORIA_CLINICA`, `RESUMEN_ALTA`, `ORDEN_MEDICA`, `CERTIFICADO_MEDICO`, `CONSENTIMIENTO_INFORMADO`, `DOCUMENTO_ADMINISTRATIVO` y `OTRO`. Para agregar o cambiar una categoría basta editar ese arreglo y su descripción: el prompt se genera a partir de ahí.
 
-```json
-{
-  "status": "clasificado",
-  "documento_id": "DOC-CLIN-2026-A1B2C3",
-  "categoria": "RECETA_MEDICA",
-  "confianza": 0.93,
-  "justificacion": "Contiene prescripción de medicamentos con dosis.",
-  "clasificado_en": "2026-10-05T21:30:00.000Z"
-}
-```
+- La salida de Gemini se fuerza a JSON con esquema y se vuelve a validar con Zod.
+- El contenido del documento se trata como datos: el prompt indica ignorar cualquier instrucción incluida dentro de él.
+- Una confianza menor a `UMBRAL_CLASIFICACION` (0.85 por defecto) o la categoría `OTRO` marcan la clasificación como ambigua. El flujo se detiene, guarda el resultado en `auditoria_humana/` y **no extrae**. La prioridad queda como `no_evaluada`, así que la revisión humana debe considerar una posible urgencia no evaluada.
+- Este umbral es independiente de la confianza de la extracción y requiere calibración con documentos revisados.
 
-- La salida de Gemini se fuerza a JSON con esquema y se vuelve a validar con
-  Zod; una respuesta inválida devuelve `502` sin exponer su contenido.
-- La confianza es declarada por el modelo. La decisión de revisión humana
-  corresponde a etapas posteriores; clasificación no devuelve ese campo ni el modelo utilizado.
-- Se revalida el contenido y el ID. Ya no se aceptan rutas OCI como entrada.
-- El resultado se incorpora al JSON consolidado guardado al finalizar `/api/process`. El endpoint individual no escribe un archivo separado.
-- El contenido del documento se trata como datos: el prompt indica ignorar
-  instrucciones incluidas dentro del documento.
-- Errores: `413` documento demasiado grande
-  (máximo 14 MiB para enviarlo a Gemini); `415` TIFF (Gemini no lo admite;
-  convertir a PDF/PNG/JPEG); `502` fallo de Gemini; `503` configuración ausente.
-- El documento se envía a la API de Gemini. Usar solo documentos sintéticos
-  hasta definir las condiciones de privacidad para datos reales de pacientes.
+### Extracción y validación
 
-## Extracción clínica estructurada
+El contrato de `datos_extraidos` cubre `paciente`, `profesionales`, `documento`, `motivo_consulta`, `sintomas`, `exploracion_fisica`, `antecedentes`, `alergias`, `signos_vitales`, `diagnosticos`, `medicamentos`, `estudios`, `resultados_laboratorio`, `procedimientos`, `evolucion_clinica`, `indicaciones`, `seguimiento`, `urgencia` e `institucion`. Los campos ausentes o ilegibles son `null` y las listas sin datos son `[]`. No se infieren códigos, dosis, diagnósticos, edades, fechas ni urgencias.
 
-Flujo activo: ingesta → clasificación con Gemini → extracción con Gemini → validación estructural local → confianza → decisión de suficiencia → prioridad y destino propuesto. El servidor ejecuta el enrutador solo después de obtener prioridad NORMAL y destino provisional Ruta_Normal; utiliza la categoría ya obtenida.
+`lib/esquema-clinico.ts` define un único contrato con Zod y genera de él el JSON Schema Draft 7, tanto para Gemini como para la validación local con Ajv. Todas las claves son obligatorias, los tipos deben ser exactos, no se permiten propiedades adicionales y no se corrige ni se fuerza ningún valor. Si el JSON es inválido, el documento va a `Cola_Auditoria_Humana` y se omiten la confianza y la prioridad. Los errores se informan con rutas JSON Pointer (por ejemplo `/paciente/edad`), sin devolver el contenido rechazado.
 
-Se guardan el original y sus metadatos al recibirlo, y un JSON consolidado al terminar la rama. Los objetos anteriores no se eliminan.
+`valido: true` significa que cumple el contrato, no que sea clínicamente correcto ni completo.
 
-`POST /api/ingest/extract` recibe directamente el archivo multipart o el JSON/texto junto con `documento_id`. Revalida el contenido y llama a Gemini sin consultar OCI.
-Utiliza `GEMINI_API_KEY`, `GEMINI_MODEL` y el prompt versionado en `lib/extraccion.ts`.
-El flujo realiza hasta cuatro llamadas al modelo: clasificación, extracción, cotejo y prioridad. La validación estructural se ejecuta localmente después de extraer; solo si pasa se realiza el cotejo. La prioridad se evalúa únicamente con confianza suficiente, dentro de la misma solicitud de extracción. Estas evaluaciones añaden latencia y consumo de Gemini.
+### Confianza de la extracción
 
-El contrato de `datos_extraidos` (prompt `3.1`) cubre diferentes documentos clínicos:
-
-| Sección | Información |
-| --- | --- |
-| `paciente` | Nombre, identificación, edad y unidad, nacimiento, sexo y contacto |
-| `profesionales` | Todos los profesionales, matrícula, especialidad y rol |
-| `documento` | Título, fecha e identificador |
-| `motivo_consulta`, `sintomas`, `exploracion_fisica` | Información de consulta y exploración |
-| `antecedentes`, `alergias` | Descripción, reacción y estado documentados |
-| `signos_vitales` | Valores, unidades y fechas |
-| `diagnosticos` | Todos los diagnósticos, estado, tipo y CIE-10 escrito |
-| `medicamentos` | Nombre, concentración, presentación, dosis, vía, frecuencia, duración, cantidad, indicaciones y estado |
-| `estudios` | Nombre, estado, fecha, región, técnica, hallazgos y conclusión |
-| `resultados_laboratorio` | Prueba, resultado, unidad, rango, indicador, muestra y fecha |
-| `procedimientos`, `evolucion_clinica` | Intervenciones, resultados y evolución detallada |
-| `indicaciones`, `seguimiento` | Cuidados, reposo, dieta, controles y derivaciones |
-| `urgencia` | Solo la urgencia expresamente documentada, sin triaje |
-| `institucion` | Nombre, teléfono, dirección, correo electrónico y sitio web del centro emisor |
-
-Los campos ausentes o ilegibles son `null` y las listas sin datos son `[]`.
-Se mantienen resultados normales y negativos, tablas y registros de distintas fechas.
-El prompt conserva detalles clínicos narrativos y extrae los contactos del centro en `institucion`. Se elimina `otros_datos`; se omiten publicidad, créditos de terceros y datos administrativos que no correspondan al esquema. Los campos institucionales ausentes quedan en `null`; no se confunden con los contactos del paciente o del profesional.
-
-Se sustituye el contrato reducido: `medico_solicitante` pasa a `profesionales` con rol;
-`estudio_realizado` a `estudios`; `diagnostico_principal` y `cie10_sugerido` a
-`diagnosticos` con tipo y código explícitos. `paciente.nombre` se mantiene.
-La interfaz recorre todas las secciones, incluyendo listas clínicas y datos institucionales.
-
-La extracción intenta cubrir toda la información legible; no garantiza exhaustividad
-ni exactitud del LLM. Se conservan los límites de entrada descritos abajo y los del
-proveedor. No se infieren códigos, dosis, diagnósticos, edades, fechas ni urgencias.
-
-No se solicita ni devuelve evidencia, confianza de extracción, inconsistencias,
-validación clínica o decisión de revisión humana. Solo se comprueba técnicamente
-el JSON mediante JSON Schema Draft 7 con Ajv (claves, tipos y ausencia de campos extra).
-La confianza de clasificación no representa una validación de los datos extraídos.
-La decisión de revisión humana queda para etapas posteriores.
-
-La respuesta `200` incluye `status: "extraido"`, `documento_id`, `datos_extraidos`,
-`extraido_en` y `validacion`, sin `version_prompt`, `modelo` ni `resultado_oci`.
-La interfaz muestra las entidades; una extracción fallida detiene el flujo.
-
-Errores: `400/422` entrada inválida; `413` más de 14 MiB
-binarios o 50.000 caracteres de texto; `415` formato no compatible; `502` fallo
-externo; `503` configuración, acceso o cuota de Gemini.
-La extracción no trunca texto. Las pruebas simulan Gemini y OCI y verifican
-que clasificación y extracción no escriban objetos.
-
-## Validación rigurosa de estructura y tipos
-
-`lib/esquema-clinico.ts` define un único contrato con Zod y genera el JSON Schema
-Draft 7 (`ESQUEMA_CLINICO`) con `zod-to-json-schema`. Ese mismo contrato genera el
-subconjunto de estructura enviado a Gemini, evitando mantener dos esquemas distintos.
-`lib/validacion-clinica.ts` compila el esquema con Ajv y valida localmente cada respuesta.
-No se pide al LLM que decida si su propia respuesta es válida.
-
-Reglas actuales:
-
-- Todas las claves del contrato son obligatorias, incluso las que permiten `null`.
-- Objetos, arrays, cadenas, números y booleanos deben tener el tipo exacto.
-- No se permiten propiedades adicionales en ningún nivel (incluidos `otros_datos` y `evidencia`).
-- Los textos deben contener al menos un carácter no blanco; si no consta un dato, se usa `null`.
-- La edad debe ser un número finito no negativo o `null`; admite decimales y conserva su unidad.
-- Las listas vacías son válidas. Fechas, dosis, resultados y unidades siguen siendo texto literal.
-- No hay coerción, valores predeterminados, eliminación de propiedades ni modificación del original.
-
-Una respuesta válida incluye, fuera de `datos_extraidos`:
-
-```json
-"validacion": {
-  "valido": true,
-  "estado": "valido",
-  "alcance": "estructura_y_tipos",
-  "version_esquema": "1.0",
-  "total_errores": 0,
-  "errores": []
-}
-```
-
-Si el JSON generado tiene sintaxis inválida o incumple el esquema, la API devuelve `200`
-con `status: "revision_humana"`, el `documento_id`, `validacion.valido: false` y
-`decision_enrutamiento.destino_principal: "Cola_Auditoria_Humana"`.
-La decisión requiere auditoría y queda pendiente de entrega. Se omiten el cálculo
-de confianza y la prioridad (`estado: "omitida"`, score nulo), sin más llamadas a Gemini.
-Este `200` confirma la decisión del flujo, no la validez del documento ni una entrega real.
-La interfaz muestra rutas JSON Pointer (por ejemplo
-`/paciente/edad`), reglas y mensajes controlados. No devuelve el contenido inválido,
-los valores clínicos rechazados ni los nombres de propiedades desconocidas.
-Se informa el total y se muestran hasta 50 errores.
-
-`valido: true` significa que cumple el contrato, no que sea clínicamente correcto,
-completo o fiel al documento. Un contrato con datos ausentes expresados mediante
-`null` puede ser válido. No se verifica todavía coherencia entre campos, fechas
-reales, dosificación, códigos contra catálogos ni autenticidad.
-
-Opciones de referencia: [documentación de Ajv](https://ajv.js.org/options.html).
-Clasificación, persistencia OCI y enrutamiento normal están activos en `/api/process`.
-
-## Confianza de la extracción clínica
-
-`lib/confianza-extraccion.ts` implementa el algoritmo versionado `1.2`. La respuesta
-incluye `extraccion.confianza_documento`, independiente de `clasificacion.confianza`.
-Gemini coteja el original completo con cada campo extraído y devuelve observaciones
-estructuradas; el servidor valida ese informe y calcula el puntaje, no lo solicita al LLM.
+`lib/confianza-extraccion.ts` implementa el algoritmo versionado `1.2`. Gemini coteja el original con cada campo extraído y devuelve observaciones estructuradas; el servidor calcula el puntaje, no el modelo.
 
 | Factor | Cálculo | Peso |
 | --- | --- | --- |
-| Legibilidad | Unidades legibles / unidades totales del original | 20 % |
-| Correspondencia | Campos respaldados por el original / campos extraídos | 40 % |
-| Cobertura | Campos respaldados / (campos respaldados + omisiones relevantes) | 25 % |
-| Consistencia | 1 − campos contradictorios / campos extraídos; máximo 0.5 si el original presenta conflictos | 15 % |
+| Legibilidad | Unidades legibles sobre unidades totales del original | 20 % |
+| Correspondencia | Campos respaldados por el original sobre campos extraídos | 40 % |
+| Cobertura | Campos respaldados sobre respaldados más omisiones relevantes | 25 % |
+| Consistencia | 1 menos campos contradictorios sobre campos extraídos | 15 % |
 
-El score es la media ponderada, en escala de 0 a 1. Se limita a 0.59 si hay
-contradicciones o algún factor inferior a 0.5. Nivel alto: desde 0.85; medio:
-desde 0.60; bajo: inferior a 0.60. La interfaz lo presenta sobre 100.
-Los campos ausentes del original o no aplicables no se penalizan por ser `null`.
-Las omisiones se estiman respecto al contrato clínico, no respecto a publicidad
-ni información ajena al esquema.
+El puntaje va de 0 a 1 y se limita a 0.59 si hay contradicciones o algún factor inferior a 0.5. Nivel alto: desde 0.85. Medio: desde 0.60. Bajo: menos de 0.60. Se exige revisión humana ante contenido ilegible, omisiones, campos sin respaldo, contradicciones o un puntaje menor a 0.85, aunque la media sea alta. Si la evaluación falla, el estado es `no_evaluable`, el puntaje es `null` y se conserva la extracción.
 
-`requiere_revision_humana` es verdadero ante contenido ilegible, omisiones,
-campos sin respaldo, contradicciones o puntaje inferior a 0.85, incluso si
-la media resulta alta. La bandera informa; todavía no envía documentos a una cola.
-Se incluyen factores, motivos y rutas de campos observados, sin citas de evidencia.
+Es un indicador heurístico con pesos provisionales (`calibrado: false`). Usa el mismo modelo que extrajo los datos, por lo que puede repetir sus errores. No es una probabilidad de exactitud.
 
-Si el evaluador falla, su respuesta es inválida o incompleta, o no hay datos
-clínicos evaluables, se conserva la extracción estructuralmente válida y se devuelve
-`estado: "no_evaluable"`, `score: null` y revisión humana requerida. Si falla el
-JSON Schema, se deriva a auditoría humana antes de llamar al evaluador.
+### Suficiencia clínica
 
-Cuando no se obtiene un score, `extraccion.confianza_documento.diagnostico`
-registra un `codigo`, una `etapa` y un `mensaje` seguro. Los fallos HTTP incluyen
-`http_status` cuando el SDK lo proporciona. Se distinguen límite o cuota (429),
-acceso denegado, modelo no encontrado, solicitud rechazada, error del servidor,
-tiempo de espera/cancelación, respuesta vacía, JSON inválido y evaluación inválida.
-Un 429 no confirma por sí solo que se hayan agotado los créditos. Los errores sin
-causa identificable conservan `EVALUACION_NO_DISPONIBLE`.
+Una etapa aparte, independiente del esquema y de la confianza, revisa si los datos alcanzan para actuar sobre ellos. Las reglas locales detectan, entre otros casos, falta de nombre o identificador del paciente, medicamentos sin nombre o con etiquetas genéricas (`Medicamento 1`) y, en recetas, ausencia de profesional o de medicamentos. Una llamada a Gemini añade observaciones sobre nombres ambiguos, pautas incompletas y contexto faltante. No hay un catálogo farmacológico conectado: no se verifica la existencia de un fármaco, la seguridad de una dosis ni las interacciones. Cualquier hallazgo bloquea la prioridad automática y propone auditoría humana.
 
-Una evaluación incompleta incluye `conteos`: campos esperados, recibidos, faltantes,
-duplicados y desconocidos, y secciones de omisión desconocidas o duplicadas. Estos
-conteos describen el informe del evaluador, no omisiones clínicas del documento.
-No se almacenan mensajes crudos del SDK, respuestas inválidas ni rutas desconocidas.
-La causa se incorpora a la justificación de auditoría y se muestra en el resumen
-y en Calidad y revisión. El score permanece `null` y se conservan los datos extraídos;
-no se modifican pesos, umbrales ni las condiciones de revisión humana. Los resultados
-anteriores sin diagnóstico siguen siendo compatibles, pero no se completan retroactivamente.
+### Prioridad y destino
 
-La versión 1.1 conserva `omisiones` por sección, con `detalles` de campo del contrato,
-cantidad y página (o null si no se identificó). Las rutas con `*` indican tipos de campos
-en listas, no una entrada concreta. Se validan las rutas, la sección y la suma de cantidades.
-Los `campos_observados` pueden incluir causa y página. No se solicitan valores clínicos
-ni citas para estos diagnósticos. Se conservan también unidades ilegibles y conflicto
-documental; si no se identificó su ubicación concreta, la interfaz lo declara.
-La justificación de auditoría resume hasta tres observaciones; Calidad y revisión
-muestra todas. Los pesos y umbrales no cambian. Las evaluaciones antiguas sin detalle
-se muestran indicando expresamente la información que no quedó registrada.
+Si la confianza es suficiente (0.85 o más, inclusive), Gemini propone la prioridad a partir de los datos cotejados. No se usa una lista de diagnósticos con umbrales clínicos.
 
-La versión 1.2 delimita el cotejo a información clínica e identificación/trazabilidad.
-No exige transcripción literal: redacción equivalente, cambios de orden y repeticiones
-sin información nueva no son omisiones. Excluye cortesías, publicidad, créditos,
-marcas de agua, instrucciones de impresión y encabezados sin datos; esos elementos
-tampoco deben influir en los conteos de legibilidad. Antes de reportar una omisión,
-el evaluador debe buscar el dato en toda la extracción y comprobar su relevancia.
-Se mantienen las observaciones por pérdida de medicamentos, dosis, contexto temporal,
-negaciones, identificación del paciente/profesional y otros datos clínicos. Las
-indicaciones de cuidados no se excluyen por usar lenguaje común. Esta delimitación
-se realiza en el prompt; sigue dependiendo del cotejo del modelo y no garantiza
-resultados idénticos entre ejecuciones. No se relajan pesos, umbrales ni la revisión
-ante omisiones relevantes reportadas. No añade validación de suficiencia médica.
+| Resultado | Destino propuesto |
+| --- | --- |
+| `URGENTE` | `Cola_Emergencia_Medica`, con una notificación preparada (`Alerta_Guardia_Medica`, estado `pendiente_envio`). |
+| `NORMAL` | `Ruta_Normal`, que el enrutador convierte en la cola de su categoría. |
+| Cualquier otro caso o fallo | `Cola_Auditoria_Humana`. |
 
-Este es un indicador heurístico con pesos y umbrales provisionales: `calibrado: false`.
-El cotejo utiliza el mismo modelo Gemini configurado para extraer, por lo que puede
-repetir sus errores. No es una probabilidad de exactitud, no certifica autenticidad
-ni valida diagnósticos o tratamientos. Requiere calibración con documentos anotados
-y revisión humana antes de usarlo para decisiones operativas. Se incluye en el resultado final almacenado en OCI.
+Todas las decisiones quedan en estado `pendiente_entrega`: **no se publican mensajes en colas reales ni se envían alertas**. Las colas son una asignación lógica registrada en el JSON.
 
-## Siguiente paso en el pipeline
+### Enrutamiento de la ruta normal
 
-La persistencia está activa y devuelve ubicaciones confirmadas en almacenamiento_oci.
-
-El flujo activo cubre **ingesta, clasificación, extracción estructurada, validación
-JSON Schema, confianza, prioridad, enrutamiento y persistencia OCI**.
-Quedan pendientes calibración de confianza, validación clínica del triaje, entrega operativa,
-resolución de revisión humana y persistencia del historial. El flujo sigue coordinado
-por el servidor mediante `/api/process`.
-
-## Decisión posterior a la confianza
-
-La extracción devuelve `evaluacion_confianza`, `prioridad_urgencia` y
-`decision_enrutamiento`. El umbral es `0.85` (inclusive), definido en
-`lib/confianza-extraccion.ts`. Se requiere estado evaluado, puntaje suficiente
-y ausencia de motivos, campos observados o señal de revisión humana.
-En caso contrario se propone `Cola_Auditoria_Humana`, con prioridad omitida
-y notificación nula, sin llamar al evaluador de prioridad.
-
-Con confianza suficiente, Gemini propone prioridad URGENTE, NORMAL o NO_DETERMINADA
-a partir de los datos cotejados. Una salida inválida, fallo del proveedor,
-prioridad indeterminada o contradicción entre NORMAL y urgencia explícita
-deriva a auditoría. No se utiliza una lista de diagnósticos con umbrales clínicos.
-Esta propuesta no es un triaje clínico validado.
-
-URGENTE selecciona `Cola_Emergencia_Medica` y prepara `notificacion_generada`
-con canal `Alerta_Guardia_Medica`, mensaje sin identificadores solicitados y
-estado `pendiente_envio`. NORMAL devuelve Ruta_Normal. El enrutador posterior asigna la cola por categoría mediante reglas fijas, sin llamadas adicionales a Gemini.
-Todas las decisiones tienen estado `pendiente_entrega`: no se publican mensajes
-en colas ni se envían alertas externas. La interfaz muestra prioridad y destino.
-
-
-## Enrutamiento de la ruta normal
-
-`lib/enrutamiento.ts` recibe únicamente `documento_id` y `categoria`. No evalúa
-confianza, revisión humana, urgencia ni disponibilidad de destinos. La selección
-se activa desde el servidor después de prioridad NORMAL; las ramas de emergencia
-y auditoría terminan sin llamar a este endpoint. No se repite clasificación.
+`lib/enrutamiento.ts` aplica reglas fijas, sin llamadas a Gemini:
 
 | Categoría | Cola |
 | --- | --- |
-| RECETA_MEDICA | cola_farmacia |
-| RESULTADO_LABORATORIO | cola_laboratorio |
-| INFORME_IMAGENOLOGIA | cola_imagenologia |
-| HISTORIA_CLINICA | cola_historia_clinica |
-| RESUMEN_ALTA | cola_resumen_alta |
-| ORDEN_MEDICA | cola_ordenes_medicas |
-| CERTIFICADO_MEDICO | cola_certificados |
-| CONSENTIMIENTO_INFORMADO | cola_consentimientos |
-| DOCUMENTO_ADMINISTRATIVO | cola_administrativa |
-| OTRO | cola_area_correspondiente |
+| `RECETA_MEDICA` | `cola_farmacia` |
+| `RESULTADO_LABORATORIO` | `cola_laboratorio` |
+| `INFORME_IMAGENOLOGIA` | `cola_imagenologia` |
+| `HISTORIA_CLINICA` | `cola_historia_clinica` |
+| `RESUMEN_ALTA` | `cola_resumen_alta` |
+| `ORDEN_MEDICA` | `cola_ordenes_medicas` |
+| `CERTIFICADO_MEDICO` | `cola_certificados` |
+| `CONSENTIMIENTO_INFORMADO` | `cola_consentimientos` |
+| `DOCUMENTO_ADMINISTRATIVO` | `cola_administrativa` |
+| `OTRO` | `cola_area_correspondiente` |
 
-El servidor agrega `enrutamiento` como bloque independiente después de `extraccion` y actualiza
-`extraccion.decision_enrutamiento.destino_principal` con esa misma cola.
-`status: enrutado` significa asignación lógica; la entrega sigue pendiente.
-Un fallo de esta llamada muestra error y conserva los datos extraídos; no deriva
-el documento nuevamente a auditoría. Los consumidores directos de la API deben
-utilizar `/api/process` para el flujo completo: el endpoint individual de rutas no comprueba etapas previas.
+## Almacenamiento en OCI
 
+El bucket es fijo en el código (`mediflow-documentos-clinicos`). Cada documento deja un original intacto y un único JSON consolidado:
 
+```text
+mediflow-documentos-clinicos/
+├── recibidos/AAAA/MM/<id>/
+│   ├── <id>.<ext>              original, con sus bytes exactos
+│   └── <id>.metadata.json      metadatos de recepción
+├── procesados/normales/<id>.json
+├── procesados/urgentes/<id>.json
+├── auditoria_humana/<id>.json
+├── rechazados/<id>.json
+└── errores/<id>.json
+```
 
-## Revisión preliminar de suficiencia clínica
+| Prefijo | Contenido |
+| --- | --- |
+| `recibidos/AAAA/MM/<id>/` | Original y metadatos. Año y mes salen de la fecha de recepción en UTC. El nombre original solo se guarda en los metadatos. |
+| `procesados/normales/` | Resultado normal, con la cola asignada. |
+| `procesados/urgentes/` | Resultado urgente y alerta preparada. |
+| `auditoria_humana/` | Clasificación ambigua, validación inválida, confianza o suficiencia insuficientes, o prioridad no evaluable. |
+| `rechazados/` | Rechazos de entrada o formato (errores `4xx`, salvo `429`). |
+| `errores/` | Fallos técnicos, del proveedor o de enrutamiento. Conserva las etapas completadas. |
 
-`extraccion.suficiencia_clinica` añade una etapa independiente del JSON Schema y
-la confianza de extracción. Conserva los datos sin corregirlos. Registra estado,
-hallazgos con ruta/código/mensaje/origen y necesidad de revisión humana.
+El JSON final incluye, en este orden y solo si se ejecutaron, los bloques `ingesta`, `clasificacion`, `extraccion`, `enrutamiento` y `almacenamiento_oci`. Las etapas no ejecutadas no se inventan. `almacenamiento_oci` informa `bucket`, `ruta_objeto` y `status_backup` (`exito`, `error` o `no_confirmado`).
 
-Reglas locales: falta de nombre e identificador del paciente; medicamentos sin
-nombre; y, cuando la clasificación es RECETA_MEDICA, falta de profesional
-identificado o ausencia de medicamentos. `/api/process` transmite la categoría
-aceptada a esta etapa. En extracción directa sin clasificación, las comprobaciones
-contextuales dependen del documento y no se asume que toda mención de medicamentos
-sea una receta.
+**Garantías de escritura**
 
-Una llamada adicional a Gemini revisa ambigüedades de nombres, pauta incompleta,
-datos relevantes ausentes y contexto del paciente necesario para interpretar la
-indicación. Recibe original, extracción y categoría, cuando está disponible. No
-exige datos de administración a medicamentos meramente históricos. Los nombres
-personales inusuales no constituyen un error ortográfico. Las rutas y códigos de
-respuesta se validan; los mensajes visibles se construyen localmente sin copiar
-respuestas libres del modelo.
+- La recepción confirma `201` solo después de guardar original y metadatos.
+- Los metadatos de recepción y el JSON final se escriben con `If-None-Match: *`: nunca se sobrescribe un objeto existente. Los objetos anteriores no se eliminan.
+- El servidor lee el original de OCI una sola vez y reutiliza esos bytes en la clasificación, la extracción y el cotejo.
+- No hay reintentos automáticos de escrituras inciertas. Un timeout puede dejar una reserva parcial que exige conciliación.
+- Si OCI no está disponible, no se puede guardar el reporte de ese mismo fallo; la interfaz lo informa.
 
-No hay catálogo farmacológico conectado. El resultado no verifica existencia,
-ortografía oficial, seguridad de dosis, interacciones o idoneidad del tratamiento.
-`sin_hallazgos` significa que las comprobaciones no detectaron observaciones; no
-certifica corrección médica. La revisión contextual es una propuesta del modelo.
-La referencia de alcance para prescripciones incluye nombre, dosis, vía y frecuencia,
-y contexto del paciente cuando resulta relevante:
-https://www.acog.org/clinical/clinical-guidance/committee-opinion/articles/2012/08/improving-medication-safety
-No se implementa un protocolo clínico ni una regla jurídica de esa jurisdicción.
+## Panel de administración
 
-Cualquier hallazgo o fallo de esta evaluación bloquea la prioridad automática y
-propone auditoría humana; se conserva el resultado en el JSON final. Si también
-falla la confianza, se conserva su justificación y los hallazgos de suficiencia se
-consultan en Calidad y revisión. La llamada adicional aumenta latencia y consumo
-de Gemini. Los resultados anteriores no se completan retroactivamente.
+Disponible en `/admin` (con acceso desde la barra superior de la página principal). Es de **consulta**: bandeja de resultados por estado, explorador de carpetas del bucket, paginación de 50 objetos, filtro por ID o nombre en la página cargada, vista estructurada de resultados, JSON original, previsualización de PDF e imágenes y descarga. No permite eliminar, mover, editar, reprocesar ni resolver auditorías.
 
+- El acceso requiere una cuenta de Supabase Auth con `app_metadata.rol = "administrador"` y `app_metadata.activo = true`. La carga y el procesamiento siguen siendo públicos.
+- El servidor consulta `getUser()` en cada petición administrativa. Una cuenta autenticada sin permiso recibe `403`; sin configuración de Supabase el acceso falla cerrado (`503`).
+- Las sesiones usan cookies `HttpOnly`, `SameSite=Lax` y `Secure` en producción (desplegar con HTTPS). No hay cliente de Supabase en el navegador ni tokens en `localStorage`.
+- El bucket es fijo; el navegador no puede enviar credenciales, URLs ni otros buckets. Los archivos tienen un límite de 20 MiB y las respuestas no se guardan en caché.
 
-Suficiencia clínica 1.1: una regla local reconoce etiquetas numeradas completas
-como `Medicamento 1`, `Medicamento #2` o `Medicamento N.º 3` (sin distinguir
-mayúsculas). Registra `MEDICAMENTO_ETIQUETA_GENERICA`, origen `regla`, y un mensaje
-con la etiqueta detectada, conservando el dato original. No usa coincidencias
-parciales ni considera genérico un nombre solo por incluir números o dosis.
-El hallazgo persiste aunque Gemini no lo reporte o falle; una observación
-`MEDICAMENTO_AMBIGUO` para el mismo campo no se duplica. Otros hallazgos se conservan.
+**Configurar el inicio de sesión**
 
-
-## Panel de administración OCI
-
-Acceso desde la barra superior de la página principal o `/admin`.
-La primera versión es de consulta: bandeja de resultados por estado, explorador
-de carpetas del bucket, navegación paginada (50 objetos), filtro de ID/nombre en
-la página cargada, vista estructurada de resultados, JSON original, previsualización
-de PDF/imágenes y descarga. Los resultados con ruta del original permiten abrirlo.
-Los originales y metadatos también están disponibles desde `recibidos/`.
-No incluye eliminar, mover, editar, reprocesar ni resolver auditorías.
-
-`GET /api/admin/objetos` admite prefijo, inicio de página y modo recursivo.
-`GET /api/admin/archivo` lee el objeto indicado por ruta; `descargar=1` fuerza descarga.
-El bucket es fijo (`mediflow-documentos-clinicos`) y no se aceptan credenciales,
-URLs ni nombres de otros buckets desde el navegador. Las respuestas no se cachean.
-Los archivos tienen un límite de 20 MiB, también comprobado durante la lectura.
-El filtro es local a la página cargada, no una búsqueda global del contenido clínico.
-La bandeja trabaja con resultados almacenados, no representa una cola ejecutable.
-
-El panel y sus APIs requieren una cuenta de Supabase Auth con
-`app_metadata.rol = "administrador"` y `app_metadata.activo = true`.
-La página principal y las APIs de carga/procesamiento permanecen públicas.
-Los permisos actuales son los de la identidad OCI del servidor: necesita
-OBJECT_INSPECT para listar y OBJECT_READ para consultar objetos del bucket.
-Esta implementación no cambia las políticas IAM ni concede permisos en OCI.
-Las credenciales permanecen en el servidor; no se crean enlaces públicos ni PAR.
-Errores de configuración o permisos se muestran sin respuestas crudas del SDK.
-
-### Configurar inicio de sesión con Supabase
-
-1. Crear un proyecto Supabase. En Authentication, desactivar **Allow new users
-   to sign up**, acceso anónimo y proveedores sociales que no se utilicen.
-   Ocultar el formulario de registro no reemplaza desactivar altas en Supabase.
-2. Copiar la URL del proyecto y su clave **publishable** (o `anon`) a
-   `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` en `.env.local` y en las variables
-   del despliegue. No utilizar `service_role` ni claves secretas. Reiniciar Next.
-3. En Authentication > Users, crear la cuenta con correo y contraseña mediante
-   la opción de creación manual (no invitación). Para la demostración, confirmar
-   el correo desde la administración. No publicar la contraseña ni subirla al repo.
-4. Autorizar ese usuario desde el SQL Editor administrativo, sustituyendo el UUID
-   por el identificador exacto mostrado en Authentication > Users:
+1. Crear un proyecto en Supabase. En Authentication, desactivar *Allow new users to sign up*, el acceso anónimo y los proveedores sociales que no se usen.
+2. Copiar la URL y la clave **publishable** a `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY`, en `.env.local` y en las variables del despliegue.
+3. En Authentication → Users, crear la cuenta con correo y contraseña (creación manual, no invitación). No publicar la contraseña ni subirla al repositorio.
+4. Autorizar al usuario desde el SQL Editor, con el UUID exacto que aparece en Authentication → Users:
 
 ```sql
 update auth.users
@@ -627,29 +274,68 @@ set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb)
 where id = 'UUID-DEL-USUARIO'::uuid;
 ```
 
-Verificar que se actualizó exactamente una fila. Estos permisos no deben ponerse
-en `user_metadata`, porque el usuario puede modificar esos metadatos.
-Para retirar acceso al panel, cambiar `activo` a `false` mediante el mismo
-procedimiento. El servidor consulta `getUser()` en cada petición administrativa
-para comprobar los metadatos vigentes; una cuenta autenticada sin permiso recibe 403.
+Verificar que se actualizó exactamente una fila. Los permisos van en `app_metadata`, nunca en `user_metadata`, porque el usuario puede modificar este último. Para retirar el acceso, cambiar `activo` a `false` con el mismo procedimiento.
 
-El botón superior dirige a `/admin`, que solicita login en `/login` si corresponde.
-El formulario solo admite correo/contraseña; no existe alta pública en MediFlow.
-Las contraseñas se gestionan en Supabase Auth, no en tablas ni archivos propios.
-La aplicación usa cookies HttpOnly, SameSite=Lax y Secure en producción: desplegar
-con HTTPS. No hay cliente Supabase en el navegador ni tokens en localStorage.
-`proxy.ts` renueva cookies solo en login y rutas administrativas; los controles
-de autorización también están en el layout y en cada API, antes de consultar OCI.
-Las respuestas administrativas no se cachean. Sin configuración el acceso falla
-cerrado (503 en APIs) y la ingesta sigue funcionando.
+No hay registro público, recuperación de contraseña por correo ni gestión de usuarios dentro de MediFlow: se administran desde Supabase.
 
-La duración/renovación de las sesiones y los límites de Auth se gestionan en
-Supabase; no se impone un vencimiento propio de una hora. Cerrar sesión afecta
-a la sesión de ese navegador. No se incluyen recuperación de contraseña por correo
-ni pantallas de gestión de usuarios en esta versión; se gestionan desde Supabase.
+## Estructura del proyecto
 
-Comprobación manual tras configurar el proyecto: entrar sin sesión a `/admin`,
-verificar que ambas APIs administrativas rechacen la consulta, iniciar sesión
-con la cuenta autorizada, listar/abrir/descargar un documento, cerrar sesión,
-comprobar nuevamente el rechazo y repetir con una cuenta sin rol o deshabilitada.
-Verificar además que la carga pública funciona sin cookies de sesión.
+```text
+app/
+  page.tsx                      interfaz de recepción y resultados
+  login/                        inicio de sesión del panel
+  admin/                        panel de administración
+  api/process/                  flujo completo (NDJSON, máximo 300 s)
+  api/ingest/                   file, json, classify, extract, route, salud
+  api/admin/                    objetos, archivo
+components/                     escena 3D, etapas, resultado, confianza, extracción, suficiencia
+lib/
+  recepcion*.ts, validators.ts  recepción y validación de formato
+  clasificacion.ts              categorías, prompt y conexión con Gemini
+  politica-clasificacion.ts     umbral de clasificación ambigua
+  extraccion.ts                 prompt y extracción
+  esquema-clinico.ts            contrato Zod y JSON Schema
+  validacion-clinica.ts         validación local con Ajv
+  confianza-extraccion.ts       puntaje de confianza
+  suficiencia-clinica.ts        revisión de suficiencia
+  decision-enrutamiento.ts      prioridad y destino propuesto
+  enrutamiento.ts               cola por categoría
+  procesar-flujo.ts             orquestación de todas las etapas
+  almacenamiento-final.ts       JSON consolidado en OCI
+  storage.ts, admin-oci.ts      acceso a OCI Object Storage
+  auth.ts, auth-config.ts       autenticación con Supabase
+proxy.ts                        renueva cookies de sesión en login y panel
+scripts/verificar-oci.ts        prueba real contra OCI con un documento sintético
+tests/                          pruebas automáticas
+```
+
+## Pruebas
+
+```bash
+npm test            # pruebas automáticas
+npm run typecheck   # TypeScript sin emitir
+npm run build       # compilación de producción
+```
+
+Las pruebas simulan Gemini y OCI y cubren las rutas terminales, los errores de escritura, la preservación del original y el JSON consolidado.
+
+`npx tsx scripts/verificar-oci.ts` hace una prueba **real** con un documento sintético: crea objetos en OCI, los vuelve a leer y comprueba que el original y el resultado coinciden. Requiere credenciales y no elimina lo que crea.
+
+## Despliegue en Vercel
+
+Next.js con App Router es nativo de Vercel: los Route Handlers usan la API estándar `Request` y `Response`. Por eso el proyecto no usa FastAPI ni Streamlit, que necesitan un proceso persistente.
+
+1. Importar el repositorio desde [vercel.com](https://vercel.com) o ejecutar `vercel` con la CLI.
+2. Verificar en *Settings → Git* que el proyecto apunta al repositorio y la rama correctos.
+3. Cargar en *Settings → Environment Variables* todas las variables de la tabla anterior, sin `NEXT_PUBLIC_`.
+4. Usar Node.js 20.9 o superior (*Settings → General → Node.js Version*).
+5. Desplegar. Sin credenciales de OCI y Gemini la página carga, pero el procesamiento responde con error.
+
+## Limitaciones conocidas
+
+- **Límite de tamaño en Vercel.** Las funciones de Vercel limitan el cuerpo de cada petición a unos 4,5 MB, menos que los 14 MiB que acepta la aplicación. Los archivos grandes pueden fallar en producción aunque funcionen en local. La alternativa es subir directo a OCI con una URL prefirmada, fuera del alcance del MVP.
+- **Duración.** `/api/process` declara un máximo de 300 segundos, sujeto a los límites reales del despliegue. No hay cola de trabajos duradera: un cierre del proceso o un timeout puede interrumpir el guardado.
+- **Sin entrega real.** Las colas y las alertas son decisiones registradas; nada se publica ni se envía. Siguen pendientes la calibración de la confianza, la validación clínica de la prioridad, la entrega operativa, la resolución de las revisiones humanas y la persistencia del historial.
+- **Calidad del LLM.** La extracción intenta cubrir toda la información legible, pero no garantiza exhaustividad ni exactitud. La confianza y la suficiencia son heurísticas.
+- **Privacidad.** Los documentos se envían a Gemini. No usar datos reales de pacientes hasta definir las condiciones de privacidad.
+- **Panel de solo lectura.** La bandeja trabaja con resultados almacenados; no es una cola ejecutable.
